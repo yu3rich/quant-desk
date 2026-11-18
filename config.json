@@ -1,0 +1,13 @@
+{
+  "port": 8765,
+  "capital": 200000,
+  "commission": 0.00025,
+  "min_commission": 5,
+  "stamp_tax": 0.0005,
+  "transfer_fee": 1e-05,
+  "slippage": 0.0005,
+  "limit_pct": 0.1,
+  "cache_start": "20180101",
+  "stocks": [],
+  "bulk_workers": 6
+}

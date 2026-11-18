@@ -1,0 +1,9 @@
+{
+  "_README": "复制为 data/emt.json 后由程序写入。字段说明见下方，password 由前端「账户设置」以 Fernet 加密后落盘，切勿手写明文。",
+  "user": "你的东财证券资金账号（数字，不要带空格）",
+  "pass_enc": "（由程序生成的 Fernet 密文，不要手填）",
+  "enabled": true,
+  "auto_sync": true,
+  "auto_time": "15:35",
+  "hist_from": "2025-01-01"
+}

@@ -1,0 +1,10 @@
+{
+  "_README": "复制为 data/llm.json。不需要 LLM 重排可以保持 enabled=false 或直接不建此文件。",
+  "enabled": false,
+  "base_url": "https://api.deepseek.com",
+  "api_key": "在此填入你自己的 API Key",
+  "model": "deepseek-chat",
+  "temperature": 0.2,
+  "timeout": 25,
+  "max_tokens": 0
+}

@@ -1,0 +1,74 @@
+# ============================================================
+# QuantDesk .gitignore
+# 原则：只提交代码与前端资源；数据、密钥、缓存、环境一律不入库
+# ============================================================
+
+# ---------- 敏感数据（绝不提交） ----------
+# data/ 下有：
+#   emt.json      券商资金账号 + 密码密文
+#   account.json  / sources.json / llm.json  API 密钥
+#   ledger/       真实交易账本（成交、资金流水、持仓）
+#   cache/        行情缓存（数百 MB）
+#   screen/       训练集、模型、选股快照（数十 MB）
+# 用 data/* 而不是 data/：这样才能给示例文件开口子
+data/*
+# 需要随仓库发布的示例与占位
+!data/.gitkeep
+!data/emt.example.json
+!data/llm.example.json
+!data/sources.example.json
+
+# 其他可能含凭据的配置文件
+config.local.json
+*.env
+.env
+.env.*
+secrets.json
+
+# ---------- Python 环境 ----------
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ---------- 备份目录（开发过程产物） ----------
+.bak_claude/
+.bak_ux/
+*.bak
+*.orig
+
+# ---------- 临时文件与验证产物 ----------
+_probe*.html
+_v_*.png
+_h*.png
+_d*.png
+_t[0-9].py
+_seed*.py
+*.tmp
+*.temp
+~$*
+Thumbs.db
+desktop.ini
+
+# ---------- 日志 ----------
+*.log
+logs/
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# ---------- 本地根目录 .genie 标记 ----------
+.wbapp_*.genie

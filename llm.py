@@ -1,0 +1,388 @@
+# -*- coding: utf-8 -*-
+"""
+QuantDesk 选股框架 · LLM 层（Stage 3）
+
+只做「候选重排 + 用因子说话的解读」，不做买卖决策、不联网抓数据、不读账户。
+- 默认关闭：未配置 / 未启用时用本地规则模板生成解读，明确标注 local，绝不伪装成 LLM
+- 启用后走用户自己填写的 OpenAI 兼容 /chat/completions 端点
+- 出网内容仅限候选的代码、名称、模型分与因子数值；不含账户、持仓、成交、自选股来源
+- 返回结果做白名单校验：模型编造的代码一律丢弃，理由截断，分数钳制
+"""
+from __future__ import annotations
+
+import json
+import re
+import time
+from pathlib import Path
+
+import requests
+
+BASE = Path(__file__).resolve().parent
+CONFIG_PATH = BASE / "data" / "llm.json"
+
+DEFAULT = {"enabled": False, "base_url": "", "api_key": "", "model": "",
+           "temperature": 0.2, "timeout": 25, "max_tokens": 0}
+# max_tokens=0 表示「按候选数量自动算预算」：
+# 推理型模型（deepseek-flash / reasoner 等）会先把预算烧在 reasoning_tokens 上，
+# 给固定 900 实测会导致 content 为空（finish_reason=length），所以默认自动放大。
+
+PRIVACY = ("仅在「已启用且点重排」时才向下方填写的端点发送候选代码/名称/模型分/因子数值；"
+           "不发送账户、持仓、成交记录或自选股来源。密钥只保存在本机 data/llm.json。")
+
+
+def _cfg() -> dict:
+    c = dict(DEFAULT)
+    if CONFIG_PATH.exists():
+        try:
+            c.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")) or {})
+        except Exception:
+            pass
+    return c
+
+
+def _save(c: dict):
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(json.dumps(c, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _mask(k: str) -> str:
+    if not k:
+        return ""
+    return k[:3] + "*" * max(4, min(len(k) - 5, 12)) + k[-2:]
+
+
+def configured(c: dict | None = None) -> bool:
+    c = c or _cfg()
+    return bool(c.get("base_url") and c.get("api_key") and c.get("model"))
+
+
+def status() -> dict:
+    c = _cfg()
+    return {"ok": True, "enabled": bool(c.get("enabled")),
+            "configured": configured(c), "base_url": c.get("base_url", ""),
+            "model": c.get("model", ""), "api_key_masked": _mask(c.get("api_key", "")),
+            "temperature": c.get("temperature", 0.2), "timeout": c.get("timeout", 25),
+            "max_tokens": c.get("max_tokens", 0),
+            "privacy": PRIVACY,
+            "mode_default": "local（本地规则解读，未调用大模型）",
+            "note": "支持任何 OpenAI 兼容端点（自建 / 云厂商 / 本地 Ollama 的兼容层），由用户自行填写。"}
+
+
+def configure(body: dict) -> dict:
+    c = _cfg()
+    if body.get("clear_key"):
+        c["api_key"] = ""
+    for k in ("enabled", "base_url", "model", "temperature", "timeout", "max_tokens"):
+        if k in body and body[k] is not None:
+            c[k] = body[k]
+    if "api_key" in body and not body.get("clear_key"):
+        v = str(body["api_key"] or "").strip()
+        if v and v != c["api_key"]:  # 前端回显的是打码值，不做覆盖
+            c["api_key"] = v
+    c["enabled"] = bool(c["enabled"])
+    c["base_url"] = str(c["base_url"] or "").strip().rstrip("/")
+    c["model"] = str(c["model"] or "").strip()
+    c["temperature"] = max(0.0, min(float(c["temperature"] or 0.2), 1.0))
+    c["timeout"] = max(5, min(int(c["timeout"] or 25), 180))
+    try:
+        c["max_tokens"] = max(0, min(int(float(c.get("max_tokens") or 0)), 8000))
+    except Exception:
+        c["max_tokens"] = 0
+    _save(c)
+    return {**status(), "ok": True, "message": "配置已保存到本机"}
+
+
+def _budget(n_items: int, cfg_tokens: int = 0) -> int:
+    """输出预算：用户显式填了就用用户的，否则按条目数估算。
+
+    推理型模型的 reasoning_tokens 与 content 共用同一个 max_tokens 池，
+    实测 10 只候选在 deepseek-flash 上要 ~1200 推理 + ~350 输出，
+    留足余量：每条候选 180 tokens，另加 1200 的推理底座。
+    """
+    if cfg_tokens and cfg_tokens >= 200:
+        return int(min(cfg_tokens, 8000))
+    n = max(1, int(n_items))
+    return int(min(1200 + n * 180, 6000))
+
+
+def _chat(messages: list[dict], c: dict, max_tokens: int = 900) -> dict:
+    url = c["base_url"].rstrip("/") + "/chat/completions"
+    payload = {"model": c["model"], "messages": messages,
+               "temperature": float(c["temperature"]), "max_tokens": max_tokens,
+               "stream": False}
+    t0 = time.time()
+    r = requests.post(url, json=payload, timeout=int(c["timeout"]),
+                      headers={"Authorization": "Bearer " + c["api_key"],
+                               "Content-Type": "application/json"})
+    r.raise_for_status()
+    obj = r.json()
+    ch = (obj.get("choices") or [{}])[0]
+    msg = ch.get("message") or {}
+    content = msg.get("content") or ""
+    if isinstance(content, list):     # 少数兼容层返回分段内容
+        content = "".join(str(x.get("text") or "") for x in content if isinstance(x, dict))
+    usage = obj.get("usage") or {}
+    return {"content": content, "usage": usage,
+            "finish_reason": ch.get("finish_reason") or "",
+            "reasoning_tokens": (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0),
+            "max_tokens": max_tokens,
+            "latency_ms": int((time.time() - t0) * 1000),
+            "model": obj.get("model") or c["model"]}
+
+
+def test(body: dict | None = None) -> dict:
+    c = _cfg()
+    if body and any(k in body for k in ("base_url", "api_key", "model", "enabled", "max_tokens")):
+        configure(body)
+        c = _cfg()
+    if not configured(c):
+        return {"ok": False, "error": "未填完整：需要 base_url、api_key、model"}
+    try:
+        # 推理型模型会先烧 reasoning tokens，20 这种小预算会拿到空 content，所以给足 900
+        r = _chat([{"role": "user", "content": "只回复两个字：可用"}], c, max_tokens=900)
+        reply = str(r["content"]).strip()
+        if not reply:
+            return {"ok": False, "error": "端点连通，但返回内容为空（finish_reason=%s，reasoning_tokens=%s）。"
+                                          "推理型模型的思考过程会占用 max_tokens，请把「最大输出 tokens」调到 2000 以上。"
+                                          % (r.get("finish_reason") or "—", r.get("reasoning_tokens") or 0)}
+        return {"ok": True, "model": r["model"], "latency_ms": r["latency_ms"],
+                "reply": reply[:80], "usage": r["usage"],
+                "finish_reason": r.get("finish_reason", "")}
+    except Exception as e:
+        return {"ok": False, "error": "连接失败：" + str(e)[:200]}
+
+
+# --------------------------------------------------------------------------
+# 本地规则解读（默认模式）
+# --------------------------------------------------------------------------
+
+def _fmt(v, nd=2, suffix="") -> str:
+    try:
+        if v is None:
+            return "—"
+        return ("%." + str(nd) + "f") % float(v) + suffix
+    except Exception:
+        return "—"
+
+
+def _local_reason(r: dict) -> str:
+    bits = []
+    if r.get("mom20") is not None:
+        bits.append("20日动量 " + _fmt(r["mom20"], 1, "%"))
+    if r.get("mom60") is not None:
+        bits.append("60日动量 " + _fmt(r["mom60"], 1, "%"))
+    if r.get("vol20") is not None:
+        bits.append("20日波动 " + _fmt(r["vol20"], 1, "%"))
+    if r.get("rsi14") is not None:
+        bits.append("RSI " + _fmt(r["rsi14"], 0))
+    if r.get("vol_ratio") is not None:
+        bits.append("量比 " + _fmt(r["vol_ratio"], 2))
+    head = "、".join(bits[:4]) if bits else "因子数据不足"
+    tail = "；横截面打分 " + _fmt(r.get("score"), 3)
+    return head + tail + "。仅为因子描述，不含买卖判断。"
+
+
+def _local(candidates: list[dict], warning: str = "", diag: dict | None = None) -> dict:
+    rows = [dict(r) for r in candidates]
+    for i, r in enumerate(rows, 1):
+        r["llm_score"] = None
+        r["reason"] = _local_reason(r)
+        r["rank_llm"] = i
+    out = {"ok": True, "mode": "local", "model": "", "rows": rows,
+           "warning": warning or "当前为本地规则解读（未调用大模型）；在下方配置并启用 LLM 后可切换为模型重排。",
+           "usage": {}, "latency_ms": 0, "privacy": PRIVACY}
+    if diag:
+        out["diag"] = diag            # 失败时把 finish_reason / 原始内容片段带回去，界面上可查
+    return out
+
+
+# --------------------------------------------------------------------------
+# LLM 重排
+# --------------------------------------------------------------------------
+
+SYSTEM = ("你是 A 股量化研究助手。只依据用户给出的横截面因子与分数，对候选做相对排序并给出简短解释。"
+          "禁止编造数据、禁止给买卖建议或目标价、禁止输出候选之外的代码。"
+          "只输出严格 JSON：{\"items\":[{\"code\":\"6位代码\",\"score\":0到100的数字,\"reason\":\"不超过60字的中文说明\"}]}")
+
+
+def _slim(r: dict) -> dict:
+    keys = ("code", "name", "score", "base_score", "mom5", "mom20", "mom60",
+            "vol20", "vol_ratio", "rsi14", "ma_dev", "macd_hist", "dd20", "industry")
+    return {k: (round(float(r[k]), 3) if isinstance(r.get(k), (int, float)) else r.get(k))
+            for k in keys if r.get(k) is not None}
+
+
+def _parse_items(text: str) -> tuple[list[dict], str]:
+    """把模型回复解析成 items。返回 (items, 失败原因)。
+
+    容错顺序：整段 JSON → 剥 ```json 包裹 → 全角标点纠正 → 截断修复（补齐括号）→ 逐对象正则捞取。
+    真实端点常出问题的地方：推理模型把预算烧光导致空内容、JSON 被截断、
+    JSON 包在解释文字里、分数写成字符串、字段名换成 reason/comment。
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return [], "empty"
+
+    def norm(obj) -> list[dict]:
+        items = obj.get("items") if isinstance(obj, dict) else obj
+        if isinstance(items, dict):
+            items = [items]
+        out = []
+        for x in (items or []):
+            if not isinstance(x, dict):
+                continue
+            code = x.get("code") or x.get("symbol") or x.get("股票代码")
+            if code is None:
+                continue
+            reason = x.get("reason") or x.get("comment") or x.get("说明") or x.get("rationale") or ""
+            out.append({"code": str(code), "score": x.get("score", x.get("分数")),
+                        "reason": reason})
+        return out
+
+    stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.S)
+    fixed = (stripped.replace("“", '"').replace("”", '"')
+             .replace("‘", "'").replace("’", "'")
+             .replace("，", ",").replace("：", ":"))
+    i, j = stripped.find("{"), stripped.rfind("}")
+    variants = [raw, stripped, fixed]
+    if i >= 0 and j > i:
+        variants += [stripped[i:j + 1], fixed[i:j + 1]]
+    for t in variants:
+        try:
+            got = norm(json.loads(t))
+            if got:
+                return got, ""
+        except Exception:
+            pass
+
+    # 截断修复：从第一个 { 开始补足未闭合的引号与括号
+    if i >= 0:
+        frag = stripped[i:]
+        depth, in_str, esc = 0, False, False
+        buf = []
+        for ch in frag:
+            buf.append(ch)
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            else:
+                if ch == '"':
+                    in_str = True
+                elif ch in "[{":
+                    depth += 1
+                elif ch in "]}":
+                    depth -= 1
+        if in_str:
+            buf.append('"')
+        repair = "".join(buf).rstrip().rstrip(",")
+        # 截断点可能落在对象内或数组内，闭合顺序不确定 → 用 6 个字符以内的组合逐一试
+        import itertools
+        for n in range(1, 7):
+            for extra in itertools.product("}]", repeat=n):
+                try:
+                    got = norm(json.loads(repair + "".join(extra)))
+                except Exception:
+                    continue
+                if got:
+                    return got, "truncated"
+
+    # 兜底：逐个对象正则捞，外层结构坏了也能救回部分候选
+    salvaged = []
+    for o in re.findall(r"\{[^{}]*\}", stripped):
+        c = re.search(r'"(?:code|symbol)"\s*:\s*"?(\d{6})"?', o)
+        s2 = re.search(r'"(?:score|\u5206\u6570)"\s*:\s*([\d.]+)', o)
+        r2 = re.search(r'"(?:reason|comment)"\s*:\s*"([^"]{0,200})"', o)
+        if c and s2:
+            salvaged.append({"code": c.group(1), "score": s2.group(1),
+                             "reason": r2.group(1) if r2 else ""})
+    if salvaged:
+        return salvaged, "salvaged"
+    return [], "unparsable"
+
+
+SYSTEM_STRICT = (SYSTEM + " 注意：不要输出任何解释性文字或思考过程，第一个字符就必须是 {，最后一个字符必须是 }。")
+
+
+def _ask(user: str, c: dict, budget: int, strict: bool = False) -> dict:
+    return _chat([{"role": "system", "content": SYSTEM_STRICT if strict else SYSTEM},
+                  {"role": "user", "content": user}], c, max_tokens=budget)
+
+
+def rerank(candidates: list[dict], as_of: str = "", horizon: int | None = None,
+           force: bool = False) -> dict:
+    """候选重排。未启用 / 未配置 / 调用失败 → 自动回退本地模式并明确说明。"""
+    c = _cfg()
+    if not candidates:
+        return {"ok": False, "error": "没有可重排的候选，请先运行一键选股"}
+    if not force and (not c.get("enabled") or not configured(c)):
+        return _local(candidates)
+
+    head = ("截止 %s，共 %d 只候选；模型口径：%s。请按相对强弱给 score 并逐条说明主要依据"
+            "（每条 reason 不超过 40 字）。"
+            % (as_of or "最近交易日", len(candidates),
+               ("未来 %s 日预测超额收益" % horizon) if horizon else "横截面打分"))
+    user = head + "\n候选 JSON：\n" + json.dumps([_slim(r) for r in candidates],
+                                              ensure_ascii=False, separators=(",", ":"))
+    budget = _budget(len(candidates), int(c.get("max_tokens") or 0))
+    try:
+        r = _ask(user, c, budget)
+        # 推理型模型会把 max_tokens 先花在 reasoning 上：内容为空/被截断时放大预算重试一次
+        if not str(r.get("content") or "").strip() or r.get("finish_reason") == "length":
+            bigger = min(max(budget * 2, 2400), 6000)
+            if bigger > budget:
+                r2 = _ask(user, c, bigger, strict=True)
+                if str(r2.get("content") or "").strip():
+                    r = r2
+        content = str(r.get("content") or "")
+        items, why = _parse_items(content)
+        diag = {"finish_reason": r.get("finish_reason", ""),
+                "reasoning_tokens": r.get("reasoning_tokens", 0),
+                "max_tokens": r.get("max_tokens", budget),
+                "content_len": len(content),
+                "raw_preview": content[:400]}
+        if not items:
+            if why == "empty":
+                msg = ("模型返回内容为空（finish_reason=%s，reasoning_tokens=%s / 预算 %s）。"
+                       "推理型模型会把预算先花在思考上：把下方「最大输出 tokens」调到 2000~4000 再试。"
+                       % (diag["finish_reason"] or "—", diag["reasoning_tokens"] or 0, diag["max_tokens"]))
+            else:
+                msg = "模型返回的内容不是可解析的 JSON（%d 字符），已回退本地规则解读（不伪造模型结论）。" % len(content)
+            return _local(candidates, msg, diag)
+        allowed = {str(x.get("code")).zfill(6) for x in candidates}
+        picked = {}
+        for x in items:
+            code = str(x.get("code")).zfill(6)
+            if code not in allowed or code in picked:
+                continue
+            try:
+                sc = float(x.get("score"))
+            except Exception:
+                continue
+            picked[code] = {"llm_score": round(max(0.0, min(100.0, sc)), 2),
+                            "reason": re.sub(r"\s+", " ", str(x.get("reason") or ""))[:120]}
+        if not picked:
+            return _local(candidates, "LLM 未返回任何有效候选代码（可能编造了代码，已过滤），已回退本地规则解读。", diag)
+        rows = [dict(x) for x in candidates]
+        for x in rows:
+            x.update(picked.get(x["code"], {"llm_score": None,
+                                            "reason": "模型未覆盖该候选，保留原始排序。"}))
+        rows.sort(key=lambda x: (x["llm_score"] is None, -(x["llm_score"] or 0),
+                                 x.get("rank", 999)))
+        for i, x in enumerate(rows, 1):
+            x["rank_llm"] = i
+        kept = len(picked)
+        warn = ""
+        if why in ("truncated", "salvaged"):
+            warn = "模型输出被截断，已修复并救回 %d 只候选；建议把「最大输出 tokens」调大。" % kept
+        if kept < len(candidates):
+            warn = (warn + " " if warn else "") + ("模型只覆盖了 %d/%d 只候选，其余保留原排序（已过滤编造代码）。"
+                                                   % (kept, len(candidates)))
+        return {"ok": True, "mode": "llm", "model": r["model"], "rows": rows,
+                "usage": r["usage"], "latency_ms": r["latency_ms"], "privacy": PRIVACY,
+                "parse": why or "ok", "diag": diag, "warning": warn}
+    except Exception as e:
+        return _local(candidates, "LLM 调用失败（%s），已回退本地规则解读。" % str(e)[:160])

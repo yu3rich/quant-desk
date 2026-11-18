@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QuantDesk · 本地 A 股量化工作台</title>
+<link rel="stylesheet" href="/static/style.css?v=20261118k">
+<script src="/static/echarts.min.js"></script>
+</head>
+<body data-page="screen" data-group="screen">
+
+<div id="loading" role="status" aria-live="polite"><div class="spin"><div class="dot"></div><div class="txt">正在计算…</div></div></div>
+<div id="toast" aria-live="polite"></div>
+
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">Q</div>
+      <div>
+        <h1>QuantDesk</h1>
+        <p class="v">本地 A 股研究工作台</p>
+      </div>
+    </div>
+
+    <nav class="nav" aria-label="主导航">
+      <div class="nav-group">
+        <div class="nav-lbl">研究</div>
+        <button class="tab nav-item on" data-tab="screen" aria-selected="true">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3h12M4.5 8h7M7 13h2"/></svg>
+          <span>选股工作台</span>
+        </button>
+        <button class="tab nav-item" data-tab="picks">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h10v11H3zM5.5 5.5h5M5.5 8h5M5.5 10.5h2.6"/></svg>
+          <span>选股记录</span>
+        </button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-lbl">验证</div>
+        <button class="tab nav-item" data-tab="overview">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 13V3M2 13h12M5 10l3-4 3 2 3-5"/></svg>
+          <span>回测总览</span>
+        </button>
+        <button class="tab nav-item" data-tab="kline">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2v3M4 11v3M4 5h0M8 1v4M8 9v3M12 3v3M12 10v3"/><rect x="2.6" y="5" width="2.8" height="6" rx=".6"/><rect x="6.6" y="5" width="2.8" height="4" rx=".6"/><rect x="10.6" y="6" width="2.8" height="4" rx=".6"/></svg>
+          <span>行情走势</span>
+        </button>
+        <button class="tab nav-item" data-tab="scan">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
+          <span>参数扫描</span>
+        </button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-lbl">数据</div>
+        <button class="tab nav-item" data-tab="ind">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2 2 5l6 3 6-3-6-3ZM2 8l6 3 6-3M2 11l6 3 6-3"/></svg>
+          <span>行业与强度</span>
+        </button>
+        <button class="tab nav-item" data-tab="pool">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><ellipse cx="8" cy="4" rx="5.4" ry="2.2"/><path d="M2.6 4v8c0 1.2 2.4 2.2 5.4 2.2s5.4-1 5.4-2.2V4M2.6 8c0 1.2 2.4 2.2 5.4 2.2s5.4-1 5.4-2.2"/></svg>
+          <span>股票池与行情</span>
+        </button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-lbl">实盘</div>
+        <button class="tab nav-item" data-tab="real">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 13V3M2 13h12"/><path d="M4.5 10.5 7 6.6l2.4 1.7L13 4"/><circle cx="4.5" cy="10.5" r="1.1"/><circle cx="13" cy="4" r="1.1"/></svg>
+          <span>实盘复盘</span>
+        </button>
+      </div>
+      <div class="nav-group">
+        <div class="nav-lbl">其他</div>
+        <button class="tab nav-item" data-tab="about">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 7v4M8 4.6v.8"/></svg>
+          <span>关于</span>
+        </button>
+      </div>
+    </nav>
+
+    <div class="side-foot">
+      <div class="sf-top">
+        <div class="sf-stat" id="scrSideStat">正在读取…</div>
+        <div class="sf-bar"><span id="scrSideBar"></span></div>
+        <p class="sf-hint" id="scrSideHint">正在读取行情覆盖…</p>
+      </div>
+      <div class="sf-acts">
+        <button class="btn sec sm" id="btnSidePool">补充行情</button>
+        <button class="btn sec sm" id="btnTerms">术语表</button>
+      </div>
+      <p class="sf-legal">仅个人研究 · 账户只读 · 数据全部本地</p>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="crumb">
+        <span class="crumb-group" id="crumbGroup">研究</span>
+        <span class="crumb-sep">/</span>
+        <h2 id="pageTitle">选股工作台</h2>
+      </div>
+      <div class="chips" data-ctx="screen">
+        <span class="chip" id="chipUniverse">全 A —</span>
+        <span class="chip" id="chipCached">已缓存 —</span>
+        <span class="chip" id="chipModel">模型 —</span>
+        <button class="chip warn" id="chipFresh" hidden>数据待更新</button>
+        <span class="chip" id="chipLlm">LLM —</span>
+      </div>
+      <div class="chips" data-ctx="backtest">
+        <span class="chip" id="chipAk">AKShare —</span>
+        <span class="chip" id="chipCache">缓存 —</span>
+        <span class="chip" id="chipSource">数据源 —</span>
+        <span class="chip" id="chipRange">区间 —</span>
+        <span class="chip" id="chipBars">— 根日线</span>
+      </div>
+      <button class="chip dl" id="chipBulk" hidden title="行情下载进行中，点击查看进度">下载中 0%</button>
+      <button class="chip q" id="btnTermsTop" title="术语表" aria-label="打开术语表">?</button>
+    </header>
+
+    <!-- 回测参数条：总览页会被移进左侧「运行设置」列，扫描页仍留在页顶横条 -->
+    <div id="btSlot">
+    <section class="btbar card" id="btBar" aria-label="回测参数">
+      <div class="bt-row">
+        <div class="field bt-f1">
+          <label for="stockSel">标的 <a href="#" id="linkPool" class="mini-link">管理 →</a></label>
+          <select id="stockSel"></select>
+        </div>
+        <div class="field bt-f1">
+          <label for="code">自定义代码</label>
+          <input id="code" type="text" placeholder="6 位代码，留空用默认标的">
+        </div>
+        <div class="field bt-f2">
+          <label>区间</label>
+          <div class="range2">
+            <input id="start" type="date" aria-label="开始日期">
+            <span class="range-sep">—</span>
+            <input id="end" type="date" aria-label="结束日期">
+          </div>
+        </div>
+        <div class="field bt-f1">
+          <label for="strategy">策略</label>
+          <select id="strategy">
+            <option value="ma_cross">双均线金叉 / 死叉</option>
+            <option value="macd">MACD 金叉 / 死叉</option>
+            <option value="rsi">RSI 均值回归</option>
+            <option value="boll">布林带突破</option>
+            <option value="factor">Alpha 因子择时</option>
+          </select>
+        </div>
+        <div class="bt-params" id="paramBox"></div>
+        <div class="bt-run">
+          <button class="btn" id="btnRun">运行回测</button>
+        </div>
+      </div>
+      <div class="bt-foot">
+        <details class="mini">
+          <summary>成本与资金</summary>
+          <div class="mini-inner">
+            <div class="field"><label>初始资金（元）</label><input id="capital" type="number" step="1000" value="100000"></div>
+            <div class="field"><label>佣金率（‰，最低 5 元）</label><input id="commission" type="number" step="0.01" value="0.25"></div>
+            <div class="field"><label>印花税（‰，仅卖出）</label><input id="stamp_tax" type="number" step="0.01" value="0.5"></div>
+            <div class="field"><label>滑点（‰，单边）</label><input id="slippage" type="number" step="0.01" value="0.5"></div>
+            <p class="hint">过户费 0.01‰、涨跌停 ±10%、100 股一手、T+1 已内建，改这里即时生效。</p>
+          </div>
+        </details>
+        <span class="bt-tools">
+          <button class="btn sec sm" id="btnRefresh">刷新行情</button>
+          <button class="btn sec sm" id="btnClearCache">清缓存</button>
+        </span>
+      </div>
+      <!-- 数据来源与告警：跟运行设置放一起，看到「这套参数」的同时就知道「用的是哪天的哪份数据」 -->
+      <div id="stSummary" class="st-summary bt-meta">正在加载…</div>
+    </section>
+    </div><!-- /btSlot -->
+
+    <!-- ===================== 选股工作台 ===================== -->
+    <section class="panel on" data-panel="screen">
+
+      <!-- 第一行：左＝本期结论与操作，右＝候选范围（运行参数） -->
+      <div class="scr-topline">
+      <!-- 结论条：一屏之内先给结果，再给操作 -->
+      <div class="card scr-top">
+        <div class="scr-top-l">
+          <div class="scr-top-title">
+            <h3>本期候选</h3>
+            <span class="pill live" id="scrScorePill">生成中</span>
+          </div>
+          <p class="scr-top-sub" id="scrHeadline">正在用本地行情生成横截面候选…</p>
+        </div>
+        <div class="scr-top-r">
+          <button class="btn" id="btnScrRun">重新选股</button>
+          <button class="btn sec sm" id="btnScrLlm">LLM 解读</button>
+          <button class="btn sec sm" id="btnScrExport" style="display:none">导出</button>
+          <button class="btn sec sm" id="btnScrSettings" aria-controls="scrDrawer" aria-expanded="false">设置</button>
+        </div>
+      </div>
+
+      <!-- 常用参数：一行放下，低频条件折叠 -->
+      <div class="card scr-params">
+        <div class="sp-row">
+          <div class="field">
+            <label for="scrScope">候选范围</label>
+            <select id="scrScope">
+              <option value="cached">已有行情缓存</option>
+              <option value="pool">我的股票池</option>
+              <option value="all">全 A 名单</option>
+            </select>
+          </div>
+          <div class="field sp-num">
+            <label for="scrTopN"><span class="term" data-term="topn">TopN</span></label>
+            <input id="scrTopN" type="number" value="10" min="1" max="100">
+          </div>
+          <div class="field sp-num">
+            <label for="scrIndustryCap"><span class="term" data-term="indcap">单行业上限</span></label>
+            <input id="scrIndustryCap" type="number" value="2" min="0" max="10">
+          </div>
+          <div class="field">
+            <label for="scrNeutral"><span class="term" data-term="neutral">打分口径</span></label>
+            <select id="scrNeutral">
+              <option value="auto" selected>自动（跟随模型）</option>
+              <option value="industry">行业中性</option>
+              <option value="industry+size">行业 + 市值中性</option>
+              <option value="none">不中性化</option>
+            </select>
+          </div>
+          <label class="check sp-check"><input type="checkbox" id="scrUseModel" checked> <span>用<span class="term" data-term="model">模型</span>分</span></label>
+          <button class="btn sec sm sp-more-btn" id="btnScrMore" aria-expanded="false" aria-controls="scrMore">更多条件</button>
+        </div>
+        <div class="sp-more" id="scrMore" hidden>
+          <div class="field">
+            <label for="scrAsOfInput">截止日（留空取最新）</label>
+            <input id="scrAsOfInput" type="date">
+          </div>
+          <div class="field">
+            <label for="scrLimit"><span class="term" data-term="cross">横截面</span>样本上限</label>
+            <input id="scrLimit" type="number" value="1500" min="200" max="6000" step="100">
+          </div>
+          <label class="check" title="快照数据日与最新行情一致时直接复用（秒出），落后就自动重算">
+            <input type="checkbox" id="scrReuse" checked> 优先复用本期截面</label>
+          <div class="sp-funnel">
+            <span class="sp-funnel-lbl"><span class="term" data-term="funnel">漏斗</span>过滤</span>
+            <label class="check"><input type="checkbox" id="scrFnQuality" checked> 数据完整</label>
+            <label class="check"><input type="checkbox" id="scrFnSt" checked> 剔 ST</label>
+            <label class="check"><input type="checkbox" id="scrFnExtreme" checked> 极端风险</label>
+            <label class="check"><input type="checkbox" id="scrFnLiquidity"> 流动性</label>
+            <label class="check"><input type="checkbox" id="scrFnTrend"> 站上 20 日线</label>
+          </div>
+        </div>
+      </div><!-- /scr-params -->
+      </div><!-- /scr-topline -->
+
+      <!-- 第二行：左列＝行业分布 + T+N 后验，右＝候选榜主体 -->
+      <div class="scr-grid">
+        <div class="scr-side">
+
+          <!-- 行业分布 -->
+          <div class="card">
+            <div class="scr-table-head">
+              <h3>行业分布 <span class="pill no" id="scrExpoPill">待计算</span></h3>
+              <span class="hint" id="scrExpoHint"></span>
+            </div>
+            <div class="expo-wrap">
+              <div class="expo-kv">
+                <div id="scrExpoDesc" class="expo-desc"></div>
+                <div id="scrExpo"><p class="note">选股后显示行业分布。</p></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 后验 -->
+          <div class="card">
+            <div class="scr-table-head">
+              <h3>T+N <span class="term" data-term="backtest">后验</span> <span class="hint" id="scrReviewTag"></span></h3>
+              <span class="scr-head-tags"><button class="btn sec sm" id="btnScrReview">重算</button></span>
+            </div>
+            <div class="scr-review" id="scrReview"><p class="note">正在准备…</p></div>
+          </div>
+
+        </div>
+
+        <!-- 候选榜（主体） -->
+        <div class="card">
+          <div class="scr-table-head">
+            <h3>候选榜 <span class="hint" id="scrAsOfTag"></span></h3>
+          <span class="scr-head-tags">
+            <span class="pill no" id="scrLlmMode">未重排</span>
+            <span class="hint scr-datahint" id="scrDataHint"></span>
+          </span>
+        </div>
+        <div class="scr-funnel" id="scrFunnel"></div>
+        <div class="scroll scr-table-wrap"><table class="pool-table" id="scrTable">          <thead><tr><th>#</th><th>代码</th><th>名称</th><th>行业</th><th>收盘</th><th>当日</th>
+            <th><span class="term" data-term="score">打分</span></th><th>20 日<span class="term" data-term="mom">动量</span></th>
+            <th>LLM</th><th>解读</th></tr></thead>
+          <tbody id="scrBody"></tbody>
+        </table></div>
+        <div class="empty" id="scrEmpty"><span id="scrEmptyText">正在生成候选…</span>
+          <div class="scr-empty-actions" id="scrEmptyActions" style="display:none">
+            <button class="btn sm" id="btnScrEmptyRun">立即选股</button>
+            <button class="btn sec sm" id="btnScrEmptyPrewarm">去补行情</button>
+          </div>
+        </div>
+        <div class="scr-under">
+          <p class="note" id="scrScoreNote">口径将在运行后显示。</p>
+          <p class="note scr-warn" id="scrWarn" hidden></p>
+        </div>
+        </div><!-- /候选榜 -->
+      </div><!-- /scr-grid -->
+
+      <!-- 设置抽屉：把训练 / LLM / 框架状态 / 范围说明统一收进来 -->
+      <div class="drawer-mask" id="scrDrawerMask" hidden></div>
+      <aside class="drawer" id="scrDrawer" aria-hidden="true" aria-label="选股设置">
+        <div class="drawer-head">
+          <h3>选股设置</h3>
+          <button class="drawer-x" id="btnScrDrawerClose" aria-label="关闭设置">✕</button>
+        </div>
+        <div class="drawer-body">
+
+          <section class="set-sec">
+            <div class="set-head">
+              <h4>数据准备</h4>
+              <span class="hint" id="scrIndustryStat">行业分类：读取中…</span>
+            </div>
+            <p class="hint">行情每天变，快照与训练集跟着重建；模型按月重训即可 —— 频繁重训会让参数在噪声里乱跳。行情源日线约 17:30 后入库，所以定时默认排在 18:10。</p>
+            <div class="pipe-box">
+              <div class="pipe-line">
+                <span class="pipe-pill" id="pipePill">检查中…</span>
+                <span class="hint" id="pipeTip"></span>
+              </div>
+              <div class="scr-kv pipe-kv" id="pipeBody"></div>
+              <div class="inline">
+                <button class="btn sm" id="btnPipeAuto">更新到最新</button>
+                <button class="btn sec sm" id="btnPipeFull">全流程重训</button>
+                <label class="check"><input type="checkbox" id="scrPipeQuote"> 先更新行情</label>
+              </div>
+              <div class="auto-row">
+                <label class="check"><input type="checkbox" id="autoSched"> 每交易日自动更新</label>
+                <input class="auto-time" id="autoTime" type="time" step="60" value="18:10" aria-label="自动更新时间">
+                <span class="hint" id="autoInfo">读取中…</span>
+              </div>
+            </div>
+            <div class="step-list">
+              <div class="step"><span class="step-n">1</span><div><b>构造训练集</b><small>多期横截面样本，标签用未来收益（仅训练）</small></div>
+                <button class="btn sec sm" id="btnScrDataset">执行</button></div>
+              <div class="step"><span class="step-n">2</span><div><b>训练 LightGBM</b><small>时序 75/25 切分，输出 IC 与特征重要度</small></div>
+                <button class="btn sec sm" id="btnScrTrain">执行</button></div>
+              <div class="step"><span class="step-n">3</span><div><b>重算快照</b><small>刷新本期因子截面，选股会自动重建</small></div>
+                <button class="btn sec sm" id="btnScrSnapshot">执行</button></div>
+            </div>
+            <div class="scr-form">
+              <div class="field"><label>训练集开始日</label><input id="scrTrainStart" type="date"></div>
+              <div class="field"><label>训练集结束日</label><input id="scrTrainEnd" type="date"></div>
+              <div class="field"><label>标签周期（交易日）</label><input id="scrHorizon" type="number" value="10" min="1" max="60"></div>
+              <div class="field"><label>采样步长</label><input id="scrStep" type="number" value="5" min="1" max="30"></div>
+              <div class="field"><label>训练股票上限</label><input id="scrMaxSymbols" type="number" value="300" min="10" max="600"></div>
+              <div class="field"><label><span class="term" data-term="label">标签</span>口径</label>
+                <select id="scrLabelMode">
+                  <option value="rank" selected>横截面分位（推荐）</option>
+                  <option value="market">全市场超额</option>
+                  <option value="industry">行业内超额</option>
+                </select>
+              </div>
+            </div>
+            <div class="inline">
+              <button class="btn sec sm" id="btnScrIndustry">同步行业分类</button>
+              <label class="check"><input type="checkbox" id="scrAutoLlm"> 选股后自动 LLM 重排</label>
+            </div>
+          </section>
+
+          <section class="set-sec">
+            <div class="set-head"><h4>模型指标</h4></div>
+            <div id="scrModel"><p class="hint">尚未训练。</p></div>
+            <p class="hint" id="scrHint"></p>
+            <div class="scr-layers" id="scrLayers"></div>
+          </section>
+
+          <section class="set-sec">
+            <div class="set-head"><h4>LLM 重排 <span class="pill no" id="scrLlmPill">未配置</span></h4></div>
+            <p class="hint">可不填。不填时用本地规则生成「一眼理由」，不会伪装成大模型结论。</p>
+            <div class="scr-form">
+              <div class="field"><label>Base URL</label><input id="scrLlmUrl" type="text" placeholder="https://api.example.com/v1"></div>
+              <div class="field"><label>API Key（仅存本机）</label><input id="scrLlmKey" type="password" placeholder="留空保留原值"></div>
+              <div class="field"><label>模型名</label><input id="scrLlmModel" type="text" placeholder="deepseek-chat"></div>
+              <div class="field"><label>最大输出 tokens（0=自动）</label><input id="scrLlmMaxTokens" type="number" min="0" max="8000" value="0"></div>
+            </div>
+            <div class="inline">
+              <label class="check"><input type="checkbox" id="scrLlmEnabled"> 启用</label>
+              <button class="btn sec sm" id="btnScrLlmSave">保存</button>
+              <button class="btn sec sm" id="btnScrLlmTest">测试</button>
+              <button class="opb del" id="btnScrLlmClear" type="button">清除 Key</button>
+            </div>
+            <p class="note" id="scrLlmNote"></p>
+            <div id="scrLlmDiag"></div>
+          </section>
+
+          <section class="set-sec">
+            <div class="set-head"><h4>参数怎么看</h4></div>
+            <dl class="set-doc">
+              <dt>训练集开始 / 结束日</dt>
+              <dd>样本区间。开始日越早样本越多，但 2019 年前的市场结构（注册制、涨跌幅、行业构成）和现在差得远，老样本会稀释信号；结束日留空＝跟到最新一个有标签的交易日，尾部「标签周期＋1」天必然留白，因为要等未来收益才能打标签。</dd>
+              <dt>标签周期</dt>
+              <dd>预测未来多少个交易日的收益。10 日约两周，噪声与换手比较平衡；1~3 日信噪比太差，60 日则样本高度重叠、等于同一段行情重复计数。</dd>
+              <dt>采样步长</dt>
+              <dd>每隔几个交易日取一期截面。步长小于标签周期时，相邻样本的标签区间重叠，IC 的独立性会下降；样本太少时调小步长能增加行数，但要接受这个偏差。</dd>
+              <dt>训练股票上限</dt>
+              <dd>每期抽多少只（等间隔取样，覆盖各交易所与市值段）。上限越大越慢，也越容易被大盘股主导；300 只是「约 6 万行样本」和「1 分钟训练」之间的折中。</dd>
+              <dt>标签口径</dt>
+              <dd>横截面分位（rank）只问「同期排第几」，天然抗极端收益，本机实测最优；全市场超额会被当日系统性涨跌带偏；行业内超额把行业 β 一并去掉，本样本期 RankIC 反而更低。</dd>
+              <dt>先更新行情</dt>
+              <dd>勾选则先把日线补到最新，再重算截面。行情源日线约 17:30 入库，早于这个时间点会用当日快照补最后一根 K 线，不必干等。</dd>
+            </dl>
+          </section>
+
+          <section class="set-sec">
+            <div class="set-head"><h4>三步在做什么</h4>
+              <span class="hint">顺序不能反：训练集 → 模型 → 快照。「更新到最新」会按需自动串起来。</span>
+            </div>
+            <div class="doc-step">
+              <b><i>1</i>构造训练集</b>
+              <p>把每期横截面拼成「日期 × 股票 × 因子 → 未来收益」的长表，落到 data/dataset.csv。只读本地缓存、不联网；它决定模型能看到什么，所以改了上面任何一个参数都要重跑。</p>
+            </div>
+            <div class="doc-step">
+              <b><i>2</i>训练 LightGBM</b>
+              <p>按时间顺序 75/25 切分：前 75% 拟合、后 25% 验证，绝不随机打乱（随机切分会让未来信息漏进训练）。产出 RankIC、IR 与特征重要度，模型落盘后选股立即生效，无需重启。</p>
+            </div>
+            <div class="doc-step">
+              <b><i>3</i>重算快照</b>
+              <p>只算「当期」这一期截面（18 个因子 + 行业列），不含标签、不联网，十几秒完成。选股每次读的就是它，所以行情一动就该重算，但不必重训模型。</p>
+            </div>
+          </section>
+
+          <section class="set-sec">
+            <div class="set-head"><h4>执行注意事项</h4></div>
+            <ul class="set-tips">
+              <li><b>别追着净值重训。</b>按月一次足够。重训后 RankIC 在 ±0.02 内来回跳是噪声，不是「模型变强了 / 变差了」。</li>
+              <li><b>改了因子必须重训。</b>因子集升级后旧模型的推理列对不上新快照，面板会提示「因子漂移」，那时模型只按自己记住的旧列打分。</li>
+              <li><b>训练集落后 2~3 个交易日是正常的</b>，尾部要等未来收益；落后超过 25 个交易日才需要重建。</li>
+              <li><b>训练期间选股不会出错</b>，只是仍用旧模型打分；模型文件是原子替换，不会读到写了一半的参数。</li>
+              <li><b>样本太少时别信 IC。</b>不足 2 万行、截面不足 100 期，RankIC 与胜率的波动比信号本身大，先在「股票池」多补些行情。</li>
+              <li><b>每天更新的只有前两段。</b>快照天天跑、模型按月，自动任务固定在工作日 18:10（行情源入库之后）。</li>
+            </ul>
+            <p class="hint">打分与解读仅供个人研究，不构成投资建议。</p>
+          </section>
+        </div>
+      </aside>
+    </section>
+
+    <!-- ===================== 选股记录 ===================== -->
+    <section class="panel" data-panel="picks">
+      <div class="card">
+        <div class="pk-head">
+          <h3>历史选股记录</h3>
+          <div class="pk-sum" id="pkSum">正在读取…</div>
+          <button class="btn sec sm" id="btnPkReload">刷新</button>
+        </div>
+        <p class="hint" id="pkNote">左侧是每次选股的结果对比，点一行在右侧看这一批的每只股票。涨跌＝记录价 → 本地缓存最新收盘价。</p>
+        <div class="pk-split">
+          <aside class="pk-side">
+            <div class="pk-side-head">
+              <span>数据日</span><span>记录</span><span class="ta-r">只数</span>
+              <span class="ta-r">至今</span><span class="ta-r">T+5</span><span class="ta-r">胜</span>
+            </div>
+            <div class="pk-list" id="pkList"></div>
+          </aside>
+          <div class="pk-detail" id="pkDetail"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== 回测总览 ===================== -->
+    <section class="panel" data-panel="overview">
+      <!-- 左：运行设置（参数条从这里挂载）；右：紧凑指标卡 + 迷你净值曲线 -->
+      <div class="ov-top">
+        <div class="ov-side" id="ovSide"></div>
+        <div class="ov-metrics">
+          <div class="kpis" id="kpis"></div>
+          <div class="card ov-spark">
+            <div class="ov-spark-h"><b>净值走势</b><span class="hint">策略 vs 买入持有（%）· 与下方大图同源</span></div>
+            <div id="chartSpark" class="chart"></div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>净值曲线 vs 买入持有</h3>
+        <div id="chartEquity" class="chart"></div>
+      </div>
+      <div class="grid2">
+        <div class="card">
+          <h3><span class="term" data-term="dd">回撤</span>曲线</h3>
+          <div id="chartDD" class="chart mid"></div>
+        </div>
+        <div class="card">
+          <h3>月度收益</h3>
+          <p class="cap">红为正、绿为负（%）</p>
+          <div id="chartMonthly" class="chart mid"></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>回测区间 K 线与买卖点</h3>
+        <p class="cap">▲ 买入、▼ 卖出，标注的是实际成交价（T+1 开盘 + 滑点），不是信号日收盘价。可滚轮缩放。</p>
+        <div id="chartK" class="chart tall"></div>
+      </div>
+      <div class="card">
+        <div class="scr-table-head">
+          <h3>模拟成交明细 <span class="pill sim">模拟</span></h3>
+          <button class="btn sec sm" id="btnExport" style="display:none">导出 CSV</button>
+        </div>
+        <p class="cap">策略推算的虚拟成交，非真实交易。价格取 T+1 开盘 + 滑点，100 股整手，含佣金 / 印花税 / 过户费。</p>
+        <div class="scroll"><table>
+          <thead><tr><th>日期</th><th>方向</th><th>成交价</th><th>股数</th><th>成交金额</th><th>手续费</th><th>盈亏(元)</th><th>收益率</th></tr></thead>
+          <tbody id="tradesBody"></tbody>
+        </table></div>
+        <div class="empty" id="tradesEmpty">暂无成交记录</div>
+      </div>
+    </section>
+
+    <!-- ===================== 行情走势 ===================== -->
+    <section class="panel" data-panel="kline">
+      <div class="card">
+        <div class="mk-head">
+          <div class="mk-id">
+            <h3 id="mkName">行情走势</h3>
+            <span class="mk-sub" id="mkSub">输入代码查看分时、五日与日周月 K 线</span>
+          </div>
+          <div class="mk-tools">
+            <input id="mkCode" class="mk-input" type="text" inputmode="numeric"
+                   placeholder="代码 / 如 600000" maxlength="9" autocomplete="off">
+            <button class="btn sec sm" id="btnMkLoad">查看</button>
+          </div>
+        </div>
+        <div class="mk-bar">
+          <div class="mk-tabs" id="mkTabs" role="tablist">
+            <button class="mk-tab on" data-period="intraday">分时</button>
+            <button class="mk-tab" data-period="five">五日</button>
+            <button class="mk-tab" data-period="day">日K</button>
+            <button class="mk-tab" data-period="week">周K</button>
+            <button class="mk-tab" data-period="month">月K</button>
+          </div>
+          <div class="mk-quote" id="mkQuote"></div>
+        </div>
+        <div id="chartMK" class="chart tall"></div>
+        <p class="hint" id="mkNote">分时与五日按分钟还原盘中走势；日、周、月为前复权蜡烛图，最新价与实时行情一致。滚轮或拖动可缩放。</p>
+      </div>
+    </section>
+
+    <!-- ===================== 参数扫描 ===================== -->
+    <section class="panel" data-panel="scan">
+      <div class="card">
+        <h3>双均线参数扫描</h3>
+        <p class="cap">一次跑完多组快 / 慢线组合，按<span class="term" data-term="sharpe">夏普</span>找稳健区间，单次最多 120 组。</p>
+        <div class="row2">
+          <div class="field"><label>快线候选（逗号分隔）</label><input id="scanFast" type="text" value="5,10,15,20,25,30"></div>
+          <div class="field"><label>慢线候选（逗号分隔）</label><input id="scanSlow" type="text" value="30,45,60,80,100,120"></div>
+        </div>
+        <div class="btn-row">
+          <button class="btn sm" id="btnScan">开始扫描</button>
+          <button class="btn sec sm" id="btnApply" style="display:none">应用最优参数</button>
+        </div>
+        <p class="note" id="scanInfo">尚未扫描。点击格子可回填参数。</p>
+      </div>
+      <div class="card">
+        <div id="chartScan" class="chart"></div>
+        <p class="note">样本内最优往往过拟合，建议前 70% 选参、后 30% <span class="term" data-term="oos">样本外</span>验证。</p>
+      </div>
+    </section>
+
+    <!-- ===================== 行业 ===================== -->
+    <section class="panel" data-panel="ind">
+      <div class="card">
+        <div class="scr-table-head">
+          <div>
+            <h3>行业分类 <span class="pill no" id="indSourcePill">—</span></h3>
+            <p class="cap" id="indMeta">正在读取行业映射…</p>
+          </div>
+          <div class="btn-row" style="margin:0">
+            <button class="btn sm" id="btnIndSync">同步分类</button>
+            <button class="btn sec sm" id="btnIndReload">刷新</button>
+          </div>
+        </div>
+        <div class="chips" style="margin-top:10px">
+          <span class="chip" id="indChipCount">覆盖 —</span>
+          <span class="chip" id="indChipIndustry">行业 —</span>
+          <span class="chip" id="indChipCached">有行情 —</span>
+          <span class="chip" id="indChipUpdated">更新 —</span>
+        </div>
+        <p class="hint" id="indSyncHint">口径：<span class="term" data-term="sw">申万一级</span>为主，证监会行业补全新股与北交所；同步约 40~90 秒，可离开本页。</p>
+      </div>
+
+      <div class="card">
+        <h3>行业强度</h3>
+        <p class="cap">20 日等权涨幅，只统计本地已有行情的成分股。样本不足的行业不做外推。</p>
+        <div id="indChart" class="chart" style="height:320px"></div>
+      </div>
+
+      <div class="card">
+        <div class="scr-table-head">
+          <h3>行业列表</h3>
+          <span class="hint" id="indTableHint">点行业名看成分股</span>
+        </div>
+        <div class="scroll" style="margin-top:10px"><table class="pool-table">
+          <thead><tr><th>行业</th><th>层级</th><th>成分数</th><th>有行情</th>
+            <th>20 日强度</th><th>5 日<span class="term" data-term="turnover">换手</span></th><th>覆盖</th></tr></thead>
+          <tbody id="indBody"></tbody>
+        </table></div>
+        <div class="empty" id="indEmpty" style="display:none">还没有行业映射，点上方「同步分类」。</div>
+      </div>
+
+      <div class="card">
+        <div class="scr-table-head">
+          <h3>成分股 <span class="hint" id="indMemberTag">未选择行业</span></h3>
+          <span class="scr-head-tags"><button class="btn sec sm" id="btnIndAddPool">加入股票池</button></span>
+        </div>
+        <div class="scroll"><table class="pool-table">
+          <thead><tr><th>代码</th><th>名称</th><th>现价</th><th>涨跌</th>
+            <th><span class="term" data-term="pe">PE</span></th><th><span class="term" data-term="pb">PB</span></th>
+            <th>总市值(亿)</th><th>换手%</th><th>行情</th></tr></thead>
+          <tbody id="indMemBody"></tbody>
+        </table></div>
+        <div class="empty" id="indMemEmpty">点上方行业名，查看成分股。</div>
+      </div>
+    </section>
+
+    <!-- ===================== 股票池 ===================== -->
+    <section class="panel" data-panel="pool">
+      <!-- 三块内容各占一屏，改成页签：一次只看一件事，不用一路往下滚 -->
+      <div class="ptabs" role="tablist" aria-label="股票池分类">
+        <button class="ptab on" role="tab" aria-selected="true" data-ptab="mine">我的股票池 <i id="ptabN_mine">—</i></button>
+        <button class="ptab" role="tab" aria-selected="false" data-ptab="all">全 A 名单 <i id="ptabN_all">—</i></button>
+        <button class="ptab" role="tab" aria-selected="false" data-ptab="src">可选账号数据源</button>
+      </div>
+
+      <div class="ptab-panel on" data-ptabbody="mine">
+      <div class="card">
+        <div class="scr-table-head">
+          <div><h3>我的股票池</h3><p class="cap" id="poolMeta">—</p></div>
+          <div class="btn-row" style="margin:0">
+            <button class="btn sec sm" id="btnPoolExportTxt">导出 TXT</button>
+            <button class="btn sec sm" id="btnPoolExportJson">导出 JSON</button>
+            <button class="btn sec sm" id="btnPoolClearSamples">清除示例</button>
+            <button class="btn sec sm danger" id="btnPoolClear">清空</button>
+          </div>
+        </div>
+        <div class="inline" style="margin-top:12px">
+          <input id="poolCode" type="text" placeholder="输入 6 位代码，如 002230">
+          <button class="btn sm" id="btnPoolAdd">添加</button>
+        </div>
+        <p class="hint" id="poolAddHint">名称自动识别，无需登录。删除类操作需点两次确认。</p>
+        <div class="scroll" style="margin-top:12px"><table class="pool-table">
+          <thead><tr><th>#</th><th>代码</th><th>名称</th><th>来源</th><th>行情</th><th>操作</th></tr></thead>
+          <tbody id="poolBody"></tbody>
+        </table></div>
+        <div class="empty" id="poolEmpty" style="display:none">股票池为空。可手动添加，或到「全 A 名单」批量加入。</div>
+      </div>
+      </div><!-- /mine -->
+
+      <div class="ptab-panel" data-ptabbody="all">
+      <div class="card">
+        <h3>全 A 名单 <span class="pill yes">免登录</span></h3>
+        <p class="cap" id="uniMeta">—</p>
+        <div class="inline">
+          <input id="uniQ" type="text" placeholder="搜索代码或名称">
+          <select id="uniMarket" style="min-width:124px;flex:0 0 auto">
+            <option value="all">全部板块</option>
+            <option value="沪市主板">沪市主板</option>
+            <option value="深市主板">深市主板</option>
+            <option value="创业板">创业板</option>
+            <option value="科创板">科创板</option>
+            <option value="北交所">北交所</option>
+          </select>
+          <label class="check"><input type="checkbox" id="uniCached"> 只看有行情</label>
+          <button class="btn sec sm" id="btnUniSearch">搜索</button>
+          <button class="btn sec sm" id="btnUniRefresh">刷新名单</button>
+          <button class="btn sec sm" id="btnUniSpot">刷新实时价</button>
+        </div>
+        <div class="inline" style="margin-top:9px">
+          <button class="btn sm" id="btnUniAdd">加入池（按筛选）</button>
+          <button class="btn sec sm" id="btnUniReplace">替换池</button>
+          <button class="btn sec sm" id="btnUniAddChecked">只加勾选</button>
+          <span class="hint" id="uniHint">按当前筛选条件操作，无需逐只输入。</span>
+        </div>
+        <div class="scroll" style="margin-top:12px;max-height:340px;overflow-y:auto"><table class="pool-table">
+          <thead><tr><th><input type="checkbox" id="uniCheckAll" aria-label="全选"></th><th>代码</th><th>名称</th><th>板块</th><th>最新价</th><th>涨跌</th><th>行情</th></tr></thead>
+          <tbody id="uniBody"></tbody>
+        </table></div>
+        <div class="inline" style="margin-top:9px">
+          <button class="btn sec sm" id="btnUniPrev">上一页</button>
+          <span class="hint" id="uniPage">—</span>
+          <button class="btn sec sm" id="btnUniNext">下一页</button>
+        </div>
+
+        <div class="subcard" id="bulkCard">
+          <h4>全市场行情下载 <span class="hint" style="margin:0">baostock 后复权 · 沪深；北交所走腾讯</span></h4>
+          <p class="hint" style="margin:3px 0 9px">首次「全量补全」建 5578 只，约 1 小时，可随时停止、可续跑；之后每交易日点一次「增量更新」约 8 分钟。</p>
+          <div class="inline">
+            <button class="btn sm" id="btnBulkInc">增量更新</button>
+            <button class="btn sec sm" id="btnBulkFull">全量补全</button>
+            <button class="btn sec sm" id="btnBulkStop">停止</button>
+            <input id="bulkLimit" type="number" placeholder="限量" min="1" style="max-width:100px;flex:0 0 auto" aria-label="限量">
+            <input id="bulkWorkers" type="number" value="6" min="1" max="8" title="并行进程数，建议 6" style="max-width:84px;flex:0 0 auto" aria-label="并行进程数">
+          </div>
+          <div class="bulk-confirm" id="bulkConfirm" hidden>
+            <span id="bulkConfirmText">—</span>
+            <span class="bc-btns">
+              <button class="btn sm" id="btnBulkYes">开始下载</button>
+              <button class="btn sec sm" id="btnBulkNo">取消</button>
+            </span>
+          </div>
+          <div class="bulk-prog" id="bulkProg" hidden>
+            <div class="bp-top"><b id="bpTitle">下载</b><span id="bpPct">0%</span></div>
+            <div class="bp-bar"><span id="bpFill"></span></div>
+            <div class="bp-meta" id="bpMeta">—</div>
+          </div>
+          <p class="hint" id="bulkStatus" style="margin:9px 0 0">—</p>
+        </div>
+        <p class="note" id="uniNote">名单缓存于 data/universe.csv，与交易所口径可能略有差异，不含退市标识。</p>
+      </div>
+      </div><!-- /all -->
+
+      <div class="ptab-panel" data-ptabbody="src">
+      <div class="card">
+        <h3>可选账号数据源</h3>
+        <p class="cap">免登录源已覆盖行情、名单与行业，不填也能全功能使用。以下两项只在你已有 Key 时可增强数据。</p>
+
+        <details class="src-block">
+          <summary><span>Tushare Pro</span><span class="pill no" id="srcPill">未配置</span><small>补齐 PE / PB / 市值 / 换手 / 量比</small></summary>
+          <div class="src-body">
+            <div class="inline">
+              <input id="srcToken" type="password" placeholder="粘贴 Tushare Token" autocomplete="off">
+              <button class="btn sm" id="btnSrcSave">保存</button>
+              <button class="btn sec sm" id="btnSrcTest">测试</button>
+              <button class="btn sec sm" id="btnSrcClear">清除</button>
+            </div>
+            <div class="inline" style="margin-top:9px">
+              <button class="btn sm" id="btnSrcFetch">拉取最新估值</button>
+              <span class="hint" id="srcStatus">未配置</span>
+            </div>
+            <p class="note" id="srcNote">Token 仅存本机 data/sources.json，界面只显示打码值；权限不足时原样返回提示，不伪造数据。</p>
+          </div>
+        </details>
+
+        <details class="src-block">
+          <summary><span>东方财富自选股</span><span class="pill no" id="acctStatus">未配置</span><small>只读同步自选股，不含持仓与成交</small></summary>
+          <div class="src-body">
+            <div class="inline">
+              <input id="acctKey" type="password" placeholder="粘贴 MX_APIKEY（mkt_…）" autocomplete="off">
+              <button class="btn sm" id="btnAcctSave">保存</button>
+              <button class="btn sec sm" id="btnAcctClear">清除</button>
+            </div>
+            <div class="inline" style="margin-top:9px">
+              <select id="acctMode" style="width:auto;min-width:150px">
+                <option value="merge">合并到股票池</option>
+                <option value="replace">替换股票池</option>
+              </select>
+              <button class="btn sm" id="btnAcctSync">同步</button>
+            </div>
+            <p class="note" id="acctNote">Key 仅存本机 data/account.json。不保存密码、不模拟登录、不调用写接口。真实持仓与成交记录不在该接口范围内。</p>
+          </div>
+        </details>
+      </div>
+      </div><!-- /src -->
+    </section>
+
+    <!-- ===================== 实盘复盘 ===================== -->
+    <section class="panel" data-panel="real">
+
+      <!-- ① 连接状态条 -->
+      <div class="card card-slim rt-bar">
+        <div class="rt-bar-l">
+          <span class="rt-dot" id="rtDot" aria-hidden="true"></span>
+          <div class="rt-bar-txt">
+            <b id="rtWho">未配置账户</b>
+            <span class="hint" id="rtWhen">配置东财账号后，每个交易日收盘自动同步一次</span>
+          </div>
+        </div>
+        <div class="rt-bar-r">
+          <span class="rt-hist" id="rtHist">历史成交 —</span>
+          <button class="btn sm" id="btnRtSync">同步账户</button>
+          <button class="btn sec sm" id="btnRtHist">拉取历史</button>
+          <button class="btn sec sm" id="btnRtCfg">账户设置</button>
+        </div>
+      </div>
+
+      <!-- ② 账户总览 -->
+      <div class="kpis rt-kpis" id="rtKpis"></div>
+
+      <!-- ③ 资金曲线 + 当日归因 -->
+      <div class="rt-cols">
+        <div class="card">
+          <div class="scr-table-head">
+            <h3>资金曲线</h3>
+            <span class="hint" id="rtCurveHint">账本还空着</span>
+          </div>
+          <div id="rtEquity" class="chart rt-chart"></div>
+          <div class="rt-curve-foot" id="rtCurveFoot"></div>
+        </div>
+        <div class="card">
+          <div class="scr-table-head">
+            <h3>当日盈亏归因</h3>
+            <span class="hint" id="rtAttrDate"></span>
+          </div>
+          <div id="rtAttr" class="rt-attr"></div>
+        </div>
+      </div>
+
+      <!-- ④ 持仓 -->
+      <div class="card">
+        <div class="scr-table-head">
+          <h3>持仓明细</h3>
+          <span class="hint" id="rtPosHint"></span>
+        </div>
+        <div class="scroll rt-pos-wrap">
+          <table class="rt-pos">
+            <thead><tr>
+              <th>代码</th><th>名称</th>
+              <th class="num">数量</th><th class="num">成本</th><th class="num">现价</th>
+              <th class="num">市值</th><th class="num">占总资产</th>
+              <th class="num">当日盈亏</th><th class="num">累计盈亏</th><th>行业</th>
+            </tr></thead>
+            <tbody id="rtPosBody"></tbody>
+          </table>
+        </div>
+        <div class="rt-sub">
+          <h4>行业分布</h4>
+          <div id="rtInd" class="rt-ind"></div>
+        </div>
+      </div>
+
+      <!-- ⑤ 交易复盘 -->
+      <div class="card">
+        <div class="scr-table-head">
+          <h3>交易复盘</h3>
+          <span class="hint" id="rtTradeHint"></span>
+        </div>
+        <div class="kpis rt-kpis4" id="rtTradeKpis"></div>
+        <div class="scroll" style="max-height:360px">
+          <table>
+            <thead><tr>
+              <th>卖出日</th><th>代码</th><th>名称</th><th class="num">数量</th>
+              <th class="num">买入价</th><th class="num">卖出价</th><th class="num">持有</th>
+              <th class="num">盈亏</th><th class="num">收益率</th>
+            </tr></thead>
+            <tbody id="rtClosedBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ⑥ 资金流水 + 委托质量（emtl 历史接口带来的两块） -->
+      <div class="rt-cols">
+        <div class="card">
+          <div class="scr-table-head">
+            <h3>资金流水</h3>
+            <span class="hint" id="rtFlowHint">出入金 / 分红 / 利息 / 税</span>
+          </div>
+          <div class="kpis rt-kpis4" id="rtFlowKpis"></div>
+          <div class="scroll" style="max-height:246px">
+            <table>
+              <thead><tr>
+                <th>日期</th><th>摘要</th><th class="num">金额</th><th class="num">余额</th>
+              </tr></thead>
+              <tbody id="rtFlowBody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="scr-table-head">
+            <h3>委托质量</h3>
+            <span class="hint" id="rtOqHint">撤单率 / 成交率 / 滑点</span>
+          </div>
+          <div class="kpis rt-kpis4" id="rtOqKpis"></div>
+          <div class="scroll" style="max-height:246px">
+            <table>
+              <thead><tr>
+                <th>日期</th><th>名称</th><th>方向</th>
+                <th class="num">委托价</th><th class="num">成交价</th>
+                <th class="num">滑点</th><th>状态</th>
+              </tr></thead>
+              <tbody id="rtOqBody"></tbody>
+            </table>
+          </div>
+          <p class="note" id="rtOqNote"></p>
+        </div>
+      </div>
+
+      <!-- ⑦ 行为体检 -->
+      <div class="card">
+        <div class="scr-table-head">
+          <h3>行为体检</h3>
+          <span class="hint">命中规则才列，不打分、不做仓位建议</span>
+        </div>
+        <div id="rtDiag" class="rt-diag"></div>
+      </div>
+
+      <!-- ⑦ 与选股系统对照 -->
+      <div class="card">
+        <div class="scr-table-head">
+          <h3>与选股系统对照</h3>
+          <span class="hint" id="rtVsHint"></span>
+        </div>
+        <div id="rtVs" class="rt-vs"></div>
+      </div>
+
+      <!-- ⑧ 复盘日记 -->
+      <div class="card">
+        <div class="scr-table-head">
+          <h3>复盘日记</h3>
+          <span class="hint" id="rtJDay"></span>
+        </div>
+        <textarea id="rtJournal" rows="4" placeholder="今天做对了什么、哪里违规了、明天开盘前要先处理什么…"></textarea>
+        <div class="inline" style="margin-top:8px">
+          <button class="btn sm" id="btnRtSaveJ">保存日记</button>
+          <span class="hint" id="rtJMsg">按账本最近交易日存，可与当日持仓、归因一起回看</span>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- 账户设置抽屉 -->
+    <div class="drawer-mask" id="rtDrawerMask" hidden></div>
+    <aside class="drawer" id="rtDrawer" aria-hidden="true" aria-label="实盘账户设置">
+      <div class="drawer-head">
+        <h3>实盘账户设置</h3>
+        <button class="drawer-x" id="btnRtDrawerClose" aria-label="关闭">✕</button>
+      </div>
+      <div class="drawer-body">
+        <section class="set-sec">
+          <div class="set-head"><h4>东方财富证券账号</h4></div>
+          <p class="hint">通过 <b>emtl</b> 登录东财证券交易网关（jywg.18.cn），只读取资金、持仓、委托、成交与资金流水，<b>不提供任何下单入口</b>。</p>
+          <div class="field"><label>资金账号</label><input type="text" id="rtUser" autocomplete="username" placeholder="东财证券资金账号"></div>
+          <div class="field"><label>交易密码</label><input type="password" id="rtPass" autocomplete="current-password" placeholder="不修改请留空"></div>
+          <p class="hint">密码用本机派生密钥加密后写入 <code>data/emt.json</code>，换机器解不开需重填；接口只返回掩码账号，不回传密码。</p>
+          <div class="inline" style="margin-top:10px">
+            <button class="btn sm" id="btnRtSave">保存并试连</button>
+            <button class="btn sec sm" id="btnRtLogout">退出登录</button>
+          </div>
+          <p class="note" id="rtCfgMsg"></p>
+        </section>
+
+        <section class="set-sec">
+          <div class="set-head"><h4>自动同步</h4></div>
+          <p class="hint">收盘后拉一次账户快照存进账本。每天最多一次、失败不重试 —— 东财账号连续登录失败会被锁，宁可少一天快照也不冒这个险。</p>
+          <div class="inline">
+            <label class="chk"><input type="checkbox" id="rtAutoSync"> 每个交易日自动同步</label>
+            <input type="time" id="rtAutoTime" value="15:35">
+            <span class="hint">收盘定盘价出来后</span>
+          </div>
+          <p class="note" id="rtAutoMsg"></p>
+        </section>
+
+        <section class="set-sec">
+          <div class="set-head"><h4>历史数据回流</h4></div>
+          <p class="hint">emtl 能直接查<b>历史成交 / 历史订单 / 资金流水</b>，不用再手工导交割单。按月切片拉，条数达上限会标出来。</p>
+          <div class="inline" style="margin-bottom:8px">
+            <label class="rt-date">起始<input type="date" id="rtHistFrom"></label>
+            <label class="rt-date">截止<input type="date" id="rtHistTo"></label>
+          </div>
+          <div class="inline" style="margin-top:8px">
+            <label class="chk"><input type="checkbox" id="rtHistTrades" checked> 成交</label>
+            <label class="chk"><input type="checkbox" id="rtHistOrders" checked> 委托</label>
+            <label class="chk"><input type="checkbox" id="rtHistFlows" checked> 流水</label>
+            <button class="btn sm" id="btnRtPull">开始拉取</button>
+            <button class="btn sec sm" id="btnRtProbe">字段诊断</button>
+          </div>
+          <p class="note" id="rtHistMsg">默认拉最近 12 个月。已经拉过的区间不会重复写入（按成交编号去重）。</p>
+          <pre class="rt-probe" id="rtProbeOut" hidden></pre>
+        </section>
+
+        <section class="set-sec">
+          <div class="set-head"><h4>这些数字怎么来的</h4></div>
+          <dl class="set-doc">
+            <dt>资金曲线两个收益口径</dt>
+            <dd><b>总资产涨跌</b>含出入金；<b>剔除出入金</b>是逐日扣掉当日净转账后连乘（TWR）。转钱进来那天曲线会跳，别用总资产涨跌判断自己做得好不好。</dd>
+            <dt>净入金</dt>
+            <dd>资金流水里「银行转证券」为 +、「证券转银行」为 −。分红、利息算收益，<b>不算出入金</b>，否则收益率会被自己的分红低估。</dd>
+            <dt>真实费用 vs 估算</dt>
+            <dd>成交回报里带佣金/印花税/过户费时直接用真实值；只有委托没带回费用时才按 万2.5 / 最低5元 / 印花税 0.05% / 过户费 0.001% 估算，界面会标出「估算 N 笔」。</dd>
+            <dt>胜率 / 盈亏比</dt>
+            <dd>把所有成交按 FIFO 配对成「平仓笔」：每笔卖出配最早的买入成本，费用按份额摊薄。没卖出过的仓位不计入胜率。</dd>
+            <dt>撤单率 / 滑点</dt>
+            <dd>来自历史委托。撤单率 = 已撤 ÷ 总委托；滑点 = 成交均价相对委托价的不利偏差（买贵/卖便宜为正），只统计有成交的委托。</dd>
+            <dt>年化换手</dt>
+            <dd>成交额 ÷ 平均总资产 ÷ 样本天数 × 244。<b>样本不足 5 个交易日不外推</b>，否则三天的成交能算出几万百分比。</dd>
+            <dt>行为体检</dt>
+            <dd>集中度、单票上限、现金缓冲、亏损集中、短持有亏损、盈亏比结构、费用占比、撤单率、滑点 —— 只做规则命中，不打分、不给买卖建议。</dd>
+          </dl>
+        </section>
+
+        <section class="set-sec">
+          <div class="set-head"><h4>能力边界</h4></div>
+          <ul class="set-tips">
+            <li><b>历史要自己拉</b>：emtl 有 <code>query_history_trades</code> / <code>query_funds_flow</code>，但单次查询有条数上限，所以按月切片；<b>拉过一次就落盘</b>，以后只补增量。</li>
+            <li><b>成本价只有快照能给</b>：成交明细能算出成交流水，但券商摊薄后的成本价（含分红送转调整）只有当日持仓接口返回，所以每日快照仍然要留。</li>
+            <li><b>不碰真钱</b>：本模块只调用查询方法，<code>create_order</code> / <code>cancel_order</code> 从未被 import，界面上也没有下单按钮。</li>
+            <li><b>字段名靠别名匹配</b>：东财没公开这些接口的字段字典，解析用候选别名（Cjrq / Cjsl / Fse ...）。若出现「未识别字段」，点「字段诊断」能看到原始字段名，补一个别名即可。</li>
+            <li><b>分红送转仍不全</b>：资金流水能拿到现金分红与红利税，但<b>送转股</b>不产生现金流，只有持仓快照里的数量变化能反映。</li>
+            <li><b>仅供个人复盘</b>：不构成投资建议，也不验证任何策略的有效性。</li>
+          </ul>
+        </section>
+      </div>
+    </aside>
+
+    <!-- ===================== 关于 ===================== -->
+    <section class="panel" data-panel="about">
+      <div class="card">
+        <h3>这是一个什么工具</h3>
+        <p class="about-p">本地运行的 A 股研究台：用公开行情做横截面选股、单只回测与参数扫描。<b>全程不下单</b> —— 实盘账户只读取资金、持仓与当日委托，任何下单/撤单接口都不引入。</p>
+        <div class="about-grid">
+          <div class="ag"><b>数据</b><span>baostock 后复权日线（沪深）· 腾讯（北交所）· 申万一级行业 · 可选 Tushare 估值</span></div>
+          <div class="ag"><b>流程</b><span>因子截面 → LightGBM 打分 → 漏斗过滤 → 行业分散 → 候选榜 → 历史后验</span></div>
+          <div class="ag"><b>回测</b><span>T 日收盘信号、T+1 开盘成交，含佣金 / 印花税 / 过户费 / 滑点 / 涨跌停 / 100 股整手</span></div>
+          <div class="ag"><b>实盘</b><span>emtl 只读接入东财（资金 / 持仓 / 委托 / 历史成交 / 资金流水）→ 每日快照 + 历史回流入账本 → 曲线、归因、胜率、委托质量、行为体检</span></div>
+          <div class="ag"><b>不做</b><span>不下单、不做协议逆向、不承诺收益；实盘只读取，绝不提交委托</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>口径与假设</h3>
+        <div class="map-row"><div class="layer">价格口径</div><div class="txt">日线<b>后复权</b>用于因子与回测，避免除权跳空被当成下跌；展示的收盘价按 <b>真实价格</b>回缩。腾讯源不含成交额与换手率，涨跌幅由收盘价推算。</div></div>
+        <div class="map-row"><div class="layer">成交假设</div><div class="txt">T 日收盘出信号、T+1 开盘成交；涨停开盘不买、跌停开盘不卖；<b>未建模</b>停牌、分红现金流与盘口深度。</div></div>
+        <div class="map-row"><div class="layer">打分口径</div><div class="txt">分数是<b>横截面相对排序</b>，不是买卖信号。基准分用 16 个个股因子的方向加权 z-score；模型分是预测的未来 N 日超额收益（%）。</div></div>
+        <div class="map-row"><div class="layer">后验口径</div><div class="txt">把当期打分逻辑放回历史每一期重放，TopN 等权持有到第 N 个交易日，分别与全市场均值、同行业中位数比较。样本期数少时只报数不下结论。</div></div>
+        <div class="map-row"><div class="layer">运行环境</div><div class="txt"><span id="cfgInfo">—</span></div></div>
+      </div>
+
+      <div class="card">
+        <details class="src-block">
+          <summary><span>技术选型与替换记录</span><small>为什么不用 Qlib / backtrader / TA-Lib</small></summary>
+          <div class="src-body">
+            <div class="map-row"><div class="layer">数据层</div><div class="txt">AKShare 提供字段规范；东财 push2his 直连接管被限流的通道；腾讯行情做真正的跨源容灾；本地 CSV 缓存支撑断网回测。</div></div>
+            <div class="map-row"><div class="layer">指标层</div><div class="txt">用纯 Python 的 <b>ta</b> + pandas 等价实现，避开 TA-Lib 的 C 库编译。</div></div>
+            <div class="map-row"><div class="layer">研究层</div><div class="txt">吸收 Qlib Alpha158 的因子思路做精简版，不引入其二进制数据格式与学习曲线。</div></div>
+            <div class="map-row"><div class="layer">回测层</div><div class="txt">沿用 backtesting.py 的心智模型，自研事件驱动引擎补上 A 股 T+1、整手、涨跌停与费用规则。</div></div>
+            <div class="map-row"><div class="layer">未引入</div><div class="txt">vn.py（实盘网关）、Qlib 全量 / Lean（数据格式重）、backtrader / 原版 zipline（停更）、freqtrade（加密）、TradingAgents（不可复现）。</div></div>
+          </div>
+        </details>
+      </div>
+
+      <div class="card card-warn">
+        <h3>使用边界</h3>
+        <p class="note" style="margin:0">仅供个人研究与学习，<b>不构成投资建议</b>，也不含买卖判断、价位或仓位建议。回测受成本、滑点、区间与过拟合影响，实盘通常显著差于回测；历史数据不代表未来。</p>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- 术语表 -->
+<div class="modal-mask" id="termMask" hidden></div>
+<div class="modal" id="termModal" role="dialog" aria-modal="true" aria-label="术语表" hidden>
+  <div class="modal-head">
+    <h3>术语表</h3>
+    <button class="drawer-x" id="btnTermClose" aria-label="关闭术语表">✕</button>
+  </div>
+  <div class="modal-body">
+    <input id="termQ" type="text" placeholder="搜索术语，如 夏普、IC、后复权" autocomplete="off">
+    <div id="termList"></div>
+  </div>
+</div>
+
+<script src="/static/app.js?v=20261118k"></script>
+</body>
+</html>
