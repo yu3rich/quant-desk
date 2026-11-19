@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>QuantDesk · 本地 A 股量化工作台</title>
-<link rel="stylesheet" href="/static/style.css?v=20261118k">
+<link rel="icon" type="image/svg+xml" href="/static/icon.svg?v=20261119ai">
+<link rel="stylesheet" href="/static/style.css?v=20261119ai">
 <script src="/static/echarts.min.js"></script>
 </head>
 <body data-page="screen" data-group="screen">
@@ -15,7 +16,7 @@
 <div class="app">
   <aside class="sidebar">
     <div class="brand">
-      <div class="logo">Q</div>
+      <div class="logo"><img src="/static/icon.svg?v=20261119ai" alt="" width="26" height="26"></div>
       <div>
         <h1>QuantDesk</h1>
         <p class="v">本地 A 股研究工作台</p>
@@ -51,6 +52,10 @@
       </div>
       <div class="nav-group">
         <div class="nav-lbl">数据</div>
+        <button class="tab nav-item" data-tab="hub">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8v3M8 11.2v3M1.8 8h3M11.2 8h3"/><circle cx="8" cy="8" r="2.6"/><path d="M3.6 3.6l1.8 1.8M10.6 10.6l1.8 1.8M12.4 3.6l-1.8 1.8M5.4 10.6l-1.8 1.8"/></svg>
+          <span>数据中枢</span>
+        </button>
         <button class="tab nav-item" data-tab="ind">
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2 2 5l6 3 6-3-6-3ZM2 8l6 3 6-3M2 11l6 3 6-3"/></svg>
           <span>行业与强度</span>
@@ -66,6 +71,10 @@
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 13V3M2 13h12"/><path d="M4.5 10.5 7 6.6l2.4 1.7L13 4"/><circle cx="4.5" cy="10.5" r="1.1"/><circle cx="13" cy="4" r="1.1"/></svg>
           <span>实盘复盘</span>
         </button>
+        <button class="tab nav-item" data-tab="journal">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2.5h7.5A2.5 2.5 0 0 1 13 5v8.5H5A2 2 0 0 0 3 15z"/><path d="M3 13.5V2.5M5.5 5h5M5.5 7.5h5M5.5 10h3"/></svg>
+          <span>复盘日记</span>
+        </button>
       </div>
       <div class="nav-group">
         <div class="nav-lbl">其他</div>
@@ -77,14 +86,13 @@
     </nav>
 
     <div class="side-foot">
-      <div class="sf-top">
-        <div class="sf-stat" id="scrSideStat">正在读取…</div>
-        <div class="sf-bar"><span id="scrSideBar"></span></div>
-        <p class="sf-hint" id="scrSideHint">正在读取行情覆盖…</p>
-      </div>
-      <div class="sf-acts">
-        <button class="btn sec sm" id="btnSidePool">补充行情</button>
-        <button class="btn sec sm" id="btnTerms">术语表</button>
+      <div class="sf-todo">
+        <button class="sf-todo-head" id="btnSfTodoRefresh" title="点击重新检查">
+          <span>今日待办</span><i class="sf-count" id="sfTodoCount">—</i>
+        </button>
+        <div class="sf-todo-list" id="sfTodoList">
+          <p class="sf-empty">正在检查数据时效…</p>
+        </div>
       </div>
       <p class="sf-legal">仅个人研究 · 账户只读 · 数据全部本地</p>
     </div>
@@ -151,16 +159,7 @@
         </div>
       </div>
       <div class="bt-foot">
-        <details class="mini">
-          <summary>成本与资金</summary>
-          <div class="mini-inner">
-            <div class="field"><label>初始资金（元）</label><input id="capital" type="number" step="1000" value="100000"></div>
-            <div class="field"><label>佣金率（‰，最低 5 元）</label><input id="commission" type="number" step="0.01" value="0.25"></div>
-            <div class="field"><label>印花税（‰，仅卖出）</label><input id="stamp_tax" type="number" step="0.01" value="0.5"></div>
-            <div class="field"><label>滑点（‰，单边）</label><input id="slippage" type="number" step="0.01" value="0.5"></div>
-            <p class="hint">过户费 0.01‰、涨跌停 ±10%、100 股一手、T+1 已内建，改这里即时生效。</p>
-          </div>
-        </details>
+        <button class="btn sec sm" id="btnBtCost" type="button" title="在数据中枢里修改回测成本与资金">成本与资金设置</button>
         <span class="bt-tools">
           <button class="btn sec sm" id="btnRefresh">刷新行情</button>
           <button class="btn sec sm" id="btnClearCache">清缓存</button>
@@ -176,7 +175,7 @@
 
       <!-- 第一行：左＝本期结论与操作，右＝候选范围（运行参数） -->
       <div class="scr-topline">
-      <!-- 结论条：一屏之内先给结果，再给操作 -->
+      <!-- 结论条：左上标题与说明，右上样本数，左下次操作，右下重新选股 -->
       <div class="card scr-top">
         <div class="scr-top-l">
           <div class="scr-top-title">
@@ -185,12 +184,15 @@
           </div>
           <p class="scr-top-sub" id="scrHeadline">正在用本地行情生成横截面候选…</p>
         </div>
-        <div class="scr-top-r">
-          <button class="btn" id="btnScrRun">重新选股</button>
+        <div class="scr-top-num" title="本期漏斗过滤后的样本数">
+          <b id="scrSampleN">—</b><span>只样本</span>
+        </div>
+        <div class="scr-top-tools">
           <button class="btn sec sm" id="btnScrLlm">LLM 解读</button>
           <button class="btn sec sm" id="btnScrExport" style="display:none">导出</button>
-          <button class="btn sec sm" id="btnScrSettings" aria-controls="scrDrawer" aria-expanded="false">设置</button>
+          <button class="btn sec sm" id="btnScrSettings" type="button" title="在数据中枢里设置选股与训练参数">设置</button>
         </div>
+        <button class="btn scr-run" id="btnScrRun">重新选股</button>
       </div>
 
       <!-- 常用参数：一行放下，低频条件折叠 -->
@@ -231,7 +233,9 @@
           </div>
           <div class="field">
             <label for="scrLimit"><span class="term" data-term="cross">横截面</span>样本上限</label>
-            <input id="scrLimit" type="number" value="1500" min="200" max="6000" step="100">
+            <input id="scrLimit" type="number" value="0" min="0" max="20000" step="100"
+                   title="0 = 全市场，用本地缓存里所有能算出完整因子的股票；填正数则按上限等间隔抽样，换取更快的构建速度">
+            <div class="hint" style="margin-top:2px">0 = 全市场</div>
           </div>
           <label class="check" title="快照数据日与最新行情一致时直接复用（秒出），落后就自动重算">
             <input type="checkbox" id="scrReuse" checked> 优先复用本期截面</label>
@@ -286,7 +290,7 @@
           </span>
         </div>
         <div class="scr-funnel" id="scrFunnel"></div>
-        <div class="scroll scr-table-wrap"><table class="pool-table" id="scrTable">          <thead><tr><th>#</th><th>代码</th><th>名称</th><th>行业</th><th>收盘</th><th>当日</th>
+        <div class="scroll scr-table-wrap"><table class="pool-table" id="scrTable">          <thead><tr><th>#</th><th>代码</th><th>名称</th><th>行业</th><th title="选股日真实收盘价（未复权）">收盘</th><th>当日</th>
             <th><span class="term" data-term="score">打分</span></th><th>20 日<span class="term" data-term="mom">动量</span></th>
             <th>LLM</th><th>解读</th></tr></thead>
           <tbody id="scrBody"></tbody>
@@ -304,143 +308,9 @@
         </div><!-- /候选榜 -->
       </div><!-- /scr-grid -->
 
-      <!-- 设置抽屉：把训练 / LLM / 框架状态 / 范围说明统一收进来 -->
-      <div class="drawer-mask" id="scrDrawerMask" hidden></div>
-      <aside class="drawer" id="scrDrawer" aria-hidden="true" aria-label="选股设置">
-        <div class="drawer-head">
-          <h3>选股设置</h3>
-          <button class="drawer-x" id="btnScrDrawerClose" aria-label="关闭设置">✕</button>
-        </div>
-        <div class="drawer-body">
-
-          <section class="set-sec">
-            <div class="set-head">
-              <h4>数据准备</h4>
-              <span class="hint" id="scrIndustryStat">行业分类：读取中…</span>
-            </div>
-            <p class="hint">行情每天变，快照与训练集跟着重建；模型按月重训即可 —— 频繁重训会让参数在噪声里乱跳。行情源日线约 17:30 后入库，所以定时默认排在 18:10。</p>
-            <div class="pipe-box">
-              <div class="pipe-line">
-                <span class="pipe-pill" id="pipePill">检查中…</span>
-                <span class="hint" id="pipeTip"></span>
-              </div>
-              <div class="scr-kv pipe-kv" id="pipeBody"></div>
-              <div class="inline">
-                <button class="btn sm" id="btnPipeAuto">更新到最新</button>
-                <button class="btn sec sm" id="btnPipeFull">全流程重训</button>
-                <label class="check"><input type="checkbox" id="scrPipeQuote"> 先更新行情</label>
-              </div>
-              <div class="auto-row">
-                <label class="check"><input type="checkbox" id="autoSched"> 每交易日自动更新</label>
-                <input class="auto-time" id="autoTime" type="time" step="60" value="18:10" aria-label="自动更新时间">
-                <span class="hint" id="autoInfo">读取中…</span>
-              </div>
-            </div>
-            <div class="step-list">
-              <div class="step"><span class="step-n">1</span><div><b>构造训练集</b><small>多期横截面样本，标签用未来收益（仅训练）</small></div>
-                <button class="btn sec sm" id="btnScrDataset">执行</button></div>
-              <div class="step"><span class="step-n">2</span><div><b>训练 LightGBM</b><small>时序 75/25 切分，输出 IC 与特征重要度</small></div>
-                <button class="btn sec sm" id="btnScrTrain">执行</button></div>
-              <div class="step"><span class="step-n">3</span><div><b>重算快照</b><small>刷新本期因子截面，选股会自动重建</small></div>
-                <button class="btn sec sm" id="btnScrSnapshot">执行</button></div>
-            </div>
-            <div class="scr-form">
-              <div class="field"><label>训练集开始日</label><input id="scrTrainStart" type="date"></div>
-              <div class="field"><label>训练集结束日</label><input id="scrTrainEnd" type="date"></div>
-              <div class="field"><label>标签周期（交易日）</label><input id="scrHorizon" type="number" value="10" min="1" max="60"></div>
-              <div class="field"><label>采样步长</label><input id="scrStep" type="number" value="5" min="1" max="30"></div>
-              <div class="field"><label>训练股票上限</label><input id="scrMaxSymbols" type="number" value="300" min="10" max="600"></div>
-              <div class="field"><label><span class="term" data-term="label">标签</span>口径</label>
-                <select id="scrLabelMode">
-                  <option value="rank" selected>横截面分位（推荐）</option>
-                  <option value="market">全市场超额</option>
-                  <option value="industry">行业内超额</option>
-                </select>
-              </div>
-            </div>
-            <div class="inline">
-              <button class="btn sec sm" id="btnScrIndustry">同步行业分类</button>
-              <label class="check"><input type="checkbox" id="scrAutoLlm"> 选股后自动 LLM 重排</label>
-            </div>
-          </section>
-
-          <section class="set-sec">
-            <div class="set-head"><h4>模型指标</h4></div>
-            <div id="scrModel"><p class="hint">尚未训练。</p></div>
-            <p class="hint" id="scrHint"></p>
-            <div class="scr-layers" id="scrLayers"></div>
-          </section>
-
-          <section class="set-sec">
-            <div class="set-head"><h4>LLM 重排 <span class="pill no" id="scrLlmPill">未配置</span></h4></div>
-            <p class="hint">可不填。不填时用本地规则生成「一眼理由」，不会伪装成大模型结论。</p>
-            <div class="scr-form">
-              <div class="field"><label>Base URL</label><input id="scrLlmUrl" type="text" placeholder="https://api.example.com/v1"></div>
-              <div class="field"><label>API Key（仅存本机）</label><input id="scrLlmKey" type="password" placeholder="留空保留原值"></div>
-              <div class="field"><label>模型名</label><input id="scrLlmModel" type="text" placeholder="deepseek-chat"></div>
-              <div class="field"><label>最大输出 tokens（0=自动）</label><input id="scrLlmMaxTokens" type="number" min="0" max="8000" value="0"></div>
-            </div>
-            <div class="inline">
-              <label class="check"><input type="checkbox" id="scrLlmEnabled"> 启用</label>
-              <button class="btn sec sm" id="btnScrLlmSave">保存</button>
-              <button class="btn sec sm" id="btnScrLlmTest">测试</button>
-              <button class="opb del" id="btnScrLlmClear" type="button">清除 Key</button>
-            </div>
-            <p class="note" id="scrLlmNote"></p>
-            <div id="scrLlmDiag"></div>
-          </section>
-
-          <section class="set-sec">
-            <div class="set-head"><h4>参数怎么看</h4></div>
-            <dl class="set-doc">
-              <dt>训练集开始 / 结束日</dt>
-              <dd>样本区间。开始日越早样本越多，但 2019 年前的市场结构（注册制、涨跌幅、行业构成）和现在差得远，老样本会稀释信号；结束日留空＝跟到最新一个有标签的交易日，尾部「标签周期＋1」天必然留白，因为要等未来收益才能打标签。</dd>
-              <dt>标签周期</dt>
-              <dd>预测未来多少个交易日的收益。10 日约两周，噪声与换手比较平衡；1~3 日信噪比太差，60 日则样本高度重叠、等于同一段行情重复计数。</dd>
-              <dt>采样步长</dt>
-              <dd>每隔几个交易日取一期截面。步长小于标签周期时，相邻样本的标签区间重叠，IC 的独立性会下降；样本太少时调小步长能增加行数，但要接受这个偏差。</dd>
-              <dt>训练股票上限</dt>
-              <dd>每期抽多少只（等间隔取样，覆盖各交易所与市值段）。上限越大越慢，也越容易被大盘股主导；300 只是「约 6 万行样本」和「1 分钟训练」之间的折中。</dd>
-              <dt>标签口径</dt>
-              <dd>横截面分位（rank）只问「同期排第几」，天然抗极端收益，本机实测最优；全市场超额会被当日系统性涨跌带偏；行业内超额把行业 β 一并去掉，本样本期 RankIC 反而更低。</dd>
-              <dt>先更新行情</dt>
-              <dd>勾选则先把日线补到最新，再重算截面。行情源日线约 17:30 入库，早于这个时间点会用当日快照补最后一根 K 线，不必干等。</dd>
-            </dl>
-          </section>
-
-          <section class="set-sec">
-            <div class="set-head"><h4>三步在做什么</h4>
-              <span class="hint">顺序不能反：训练集 → 模型 → 快照。「更新到最新」会按需自动串起来。</span>
-            </div>
-            <div class="doc-step">
-              <b><i>1</i>构造训练集</b>
-              <p>把每期横截面拼成「日期 × 股票 × 因子 → 未来收益」的长表，落到 data/dataset.csv。只读本地缓存、不联网；它决定模型能看到什么，所以改了上面任何一个参数都要重跑。</p>
-            </div>
-            <div class="doc-step">
-              <b><i>2</i>训练 LightGBM</b>
-              <p>按时间顺序 75/25 切分：前 75% 拟合、后 25% 验证，绝不随机打乱（随机切分会让未来信息漏进训练）。产出 RankIC、IR 与特征重要度，模型落盘后选股立即生效，无需重启。</p>
-            </div>
-            <div class="doc-step">
-              <b><i>3</i>重算快照</b>
-              <p>只算「当期」这一期截面（18 个因子 + 行业列），不含标签、不联网，十几秒完成。选股每次读的就是它，所以行情一动就该重算，但不必重训模型。</p>
-            </div>
-          </section>
-
-          <section class="set-sec">
-            <div class="set-head"><h4>执行注意事项</h4></div>
-            <ul class="set-tips">
-              <li><b>别追着净值重训。</b>按月一次足够。重训后 RankIC 在 ±0.02 内来回跳是噪声，不是「模型变强了 / 变差了」。</li>
-              <li><b>改了因子必须重训。</b>因子集升级后旧模型的推理列对不上新快照，面板会提示「因子漂移」，那时模型只按自己记住的旧列打分。</li>
-              <li><b>训练集落后 2~3 个交易日是正常的</b>，尾部要等未来收益；落后超过 25 个交易日才需要重建。</li>
-              <li><b>训练期间选股不会出错</b>，只是仍用旧模型打分；模型文件是原子替换，不会读到写了一半的参数。</li>
-              <li><b>样本太少时别信 IC。</b>不足 2 万行、截面不足 100 期，RankIC 与胜率的波动比信号本身大，先在「股票池」多补些行情。</li>
-              <li><b>每天更新的只有前两段。</b>快照天天跑、模型按月，自动任务固定在工作日 18:10（行情源入库之后）。</li>
-            </ul>
-            <p class="hint">打分与解读仅供个人研究，不构成投资建议。</p>
-          </section>
-        </div>
-      </aside>
     </section>
+
+
 
     <!-- ===================== 选股记录 ===================== -->
     <section class="panel" data-panel="picks">
@@ -450,11 +320,11 @@
           <div class="pk-sum" id="pkSum">正在读取…</div>
           <button class="btn sec sm" id="btnPkReload">刷新</button>
         </div>
-        <p class="hint" id="pkNote">左侧是每次选股的结果对比，点一行在右侧看这一批的每只股票。涨跌＝记录价 → 本地缓存最新收盘价。</p>
+        <p class="hint" id="pkNote">左侧是每次选股的结果对比，点一行在右侧看这一批的每只股票。<b>数据日</b>是行情截面截止到哪一天，<b>选股日</b>是实际跑这批筛选的日期——数据日通常比选股日早 1～2 个交易日。价格已换算成真实价（未复权，和券商 App 一致）；涨跌＝记录价 → 最新收盘，按后复权同口径计算。</p>
         <div class="pk-split">
           <aside class="pk-side">
             <div class="pk-side-head">
-              <span>数据日</span><span>记录</span><span class="ta-r">只数</span>
+              <span>数据日</span><span>选股日</span><span class="ta-r">只数</span>
               <span class="ta-r">至今</span><span class="ta-r">T+5</span><span class="ta-r">胜</span>
             </div>
             <div class="pk-list" id="pkList"></div>
@@ -466,20 +336,16 @@
 
     <!-- ===================== 回测总览 ===================== -->
     <section class="panel" data-panel="overview">
-      <!-- 左：运行设置（参数条从这里挂载）；右：紧凑指标卡 + 迷你净值曲线 -->
+      <!-- 左：运行设置（参数条从这里挂载）；右：紧凑指标卡 + 净值曲线 -->
       <div class="ov-top">
         <div class="ov-side" id="ovSide"></div>
         <div class="ov-metrics">
           <div class="kpis" id="kpis"></div>
           <div class="card ov-spark">
-            <div class="ov-spark-h"><b>净值走势</b><span class="hint">策略 vs 买入持有（%）· 与下方大图同源</span></div>
+            <div class="ov-spark-h"><b>净值曲线 vs 买入持有</b><span class="hint">滚轮缩放 · 单位元</span></div>
             <div id="chartSpark" class="chart"></div>
           </div>
         </div>
-      </div>
-      <div class="card">
-        <h3>净值曲线 vs 买入持有</h3>
-        <div id="chartEquity" class="chart"></div>
       </div>
       <div class="grid2">
         <div class="card">
@@ -513,6 +379,13 @@
 
     <!-- ===================== 行情走势 ===================== -->
     <section class="panel" data-panel="kline">
+      <div class="mk-idx-row" id="mkIndexRow" aria-label="主要指数">
+        <div class="mk-idx"><div class="nm">上证指数</div><div class="px">—</div><div class="pct">读取中…</div></div>
+        <div class="mk-idx"><div class="nm">深证成指</div><div class="px">—</div><div class="pct">读取中…</div></div>
+        <div class="mk-idx"><div class="nm">创业板指</div><div class="px">—</div><div class="pct">读取中…</div></div>
+        <div class="mk-idx"><div class="nm">北证50</div><div class="px">—</div><div class="pct">读取中…</div></div>
+        <div class="mk-idx"><div class="nm">科创50</div><div class="px">—</div><div class="pct">读取中…</div></div>
+      </div>
       <div class="card">
         <div class="mk-head">
           <div class="mk-id">
@@ -524,6 +397,11 @@
                    placeholder="代码 / 如 600000" maxlength="9" autocomplete="off">
             <button class="btn sec sm" id="btnMkLoad">查看</button>
           </div>
+        </div>
+        <div class="mk-hist" id="mkHistBar">
+          <span class="mk-hist-lbl">查看记录</span>
+          <div class="mk-hist-list" id="mkHistList"></div>
+          <button class="mk-hist-clear" id="btnMkHistClear" hidden>清空</button>
         </div>
         <div class="mk-bar">
           <div class="mk-tabs" id="mkTabs" role="tablist">
@@ -561,6 +439,418 @@
       </div>
     </section>
 
+    <!-- ===================== 数据中枢 ===================== -->
+    <section class="panel" data-panel="hub">
+      <div class="card hub-head">
+        <div class="scr-table-head">
+          <div>
+            <h3>数据与参数设置 <span class="pill no" id="hubHeadPill">集中管理</span></h3>
+            <p class="cap">数据链、选股训练、回测成本、数据源、实盘账户与 AI 服务统一收在这里。各页只保留跳转入口，不再重复放表单。</p>
+          </div>
+          <div class="btn-row" style="margin:0">
+            <button class="btn sec sm" id="btnHubReload">刷新状态</button>
+          </div>
+        </div>
+        <div class="hub-tabs" id="hubTabs" role="tablist" aria-label="数据中枢分类">
+          <button type="button" class="hub-tab on" data-hubtab="chain" role="tab" aria-selected="true">数据链</button>
+          <button type="button" class="hub-tab" data-hubtab="screen" role="tab" aria-selected="false">选股与训练</button>
+          <button type="button" class="hub-tab" data-hubtab="backtest" role="tab" aria-selected="false">回测默认</button>
+          <button type="button" class="hub-tab" data-hubtab="sources" role="tab" aria-selected="false">数据源</button>
+          <button type="button" class="hub-tab" data-hubtab="real" role="tab" aria-selected="false">实盘账户</button>
+          <button type="button" class="hub-tab" data-hubtab="ai" role="tab" aria-selected="false">AI 服务</button>
+          <button type="button" class="hub-tab" data-hubtab="runs" role="tab" aria-selected="false">更新记录</button>
+        </div>
+      </div>
+
+      <!-- 数据链 -->
+      <div class="hub-pane on" data-hubtab="chain">
+        <div class="card">
+          <div class="scr-table-head">
+            <div>
+              <h3>四段数据链 <span class="pipe-pill" id="hubPill">检查中…</span></h3>
+              <p class="cap" id="hubTip">统一查看行情 / 快照 / 训练集 / 模型的时效，一处更新。</p>
+            </div>
+          </div>
+          <div class="scr-kv pipe-kv" id="hubChain"></div>
+          <div class="hub-steps">
+            <label class="check"><input type="checkbox" id="hubStepQuote" checked> 行情增量</label>
+            <label class="check"><input type="checkbox" id="hubStepSnapshot" checked> 横截面快照</label>
+            <label class="check"><input type="checkbox" id="hubStepDataset"> 训练集</label>
+            <label class="check"><input type="checkbox" id="hubStepModel"> 模型重训</label>
+          </div>
+          <div class="inline">
+            <button class="btn sm" id="btnHubAuto">更新到最新</button>
+            <button class="btn sec sm" id="btnHubSel">执行所选</button>
+            <button class="btn sec sm" id="btnHubFull">全流程重训</button>
+            <span class="hint">「更新到最新」按需自动选段；「执行所选」只跑勾选的段。</span>
+          </div>
+          <div class="auto-row">
+            <label class="check"><input type="checkbox" id="hubSched"> 每交易日自动更新</label>
+            <input class="auto-time" id="hubTime" type="time" step="60" value="18:10" aria-label="自动更新时间">
+            <span class="hint" id="hubSchedInfo">读取中…</span>
+          </div>
+          <div class="inline" style="margin-top:9px">
+            <label class="hub-workers">行情并发进程
+              <input id="hubWorkers" type="number" value="6" min="1" max="8" style="max-width:70px">
+            </label>
+            <button class="btn sec sm" id="btnHubWorkers">保存</button>
+            <span class="hint">建议 6；超过 6 会互踢登录。仅影响行情增量下载。</span>
+          </div>
+        </div>
+        <div class="card hub-note-card">
+          <p class="hint" style="margin:0">「更新到最新」会按数据日自动判断要跑哪几段：日常跑行情与快照，训练集落后约一个月才自动补；模型不会自动重训，到期会在待办里提醒，确认后手动执行。跑完后到「更新记录」查看每一步的结果与耗时。</p>
+        </div>
+      </div>
+
+      <!-- 选股与训练 -->
+      <div class="hub-pane" data-hubtab="screen">
+        <div class="card">
+          <div class="scr-table-head">
+            <div>
+              <h3>数据准备</h3>
+              <p class="cap">行情每天变，快照每日跟着重建、训练集按月补齐；模型只在手动确认后重训，频繁重训会让参数在噪声里乱跳。</p>
+            </div>
+            <span class="hint" id="scrIndustryStat">行业分类：读取中…</span>
+          </div>
+          <div class="pipe-box">
+            <div class="pipe-line">
+              <span class="pipe-pill" id="pipePill">检查中…</span>
+              <span class="hint" id="pipeTip"></span>
+            </div>
+            <div class="scr-kv pipe-kv" id="pipeBody"></div>
+            <p class="hint" style="margin:8px 0 0">数据链的更新与定时任务统一在「数据链」标签页操作。
+              <button type="button" class="linklike" data-hubgo="chain">去更新</button></p>
+          </div>
+          <div class="step-list">
+            <div class="step"><span class="step-n">1</span><div><b>构造训练集</b><small>多期横截面样本，标签用未来收益（仅训练）</small></div>
+              <button class="btn sec sm" id="btnScrDataset">执行</button></div>
+            <div class="step"><span class="step-n">2</span><div><b>训练 LightGBM</b><small>时序 75/25 切分，输出 IC 与特征重要度</small></div>
+              <button class="btn sec sm" id="btnScrTrain">执行</button></div>
+            <div class="step"><span class="step-n">3</span><div><b>重算快照</b><small>刷新本期因子截面，选股会自动重建</small></div>
+              <button class="btn sec sm" id="btnScrSnapshot">执行</button></div>
+          </div>
+          <div class="scr-form">
+            <div class="field"><label>训练集开始日</label><input id="scrTrainStart" type="date"></div>
+            <div class="field"><label>训练集结束日</label><input id="scrTrainEnd" type="date"></div>
+            <div class="field"><label>标签周期（交易日）</label><input id="scrHorizon" type="number" value="10" min="1" max="60"></div>
+            <div class="field"><label>采样步长</label><input id="scrStep" type="number" value="5" min="1" max="30"></div>
+            <div class="field"><label>训练股票上限</label><input id="scrMaxSymbols" type="number" value="300" min="10" max="600"></div>
+            <div class="field"><label><span class="term" data-term="label">标签</span>口径</label>
+              <select id="scrLabelMode">
+                <option value="rank" selected>横截面分位（推荐）</option>
+                <option value="market">全市场超额</option>
+                <option value="industry">行业内超额</option>
+              </select>
+            </div>
+          </div>
+          <div class="inline">
+            <button class="btn sec sm" id="btnScrIndustry">同步行业分类</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="scr-table-head">
+            <div><h3>模型状态</h3><p class="cap">当前模型、快照与训练集的落地情况。</p></div>
+          </div>
+          <div id="scrModel"><p class="hint">尚未训练。</p></div>
+          <p class="hint" id="scrHint"></p>
+          <div class="scr-layers" id="scrLayers"></div>
+          <p class="hint" style="margin-top:8px">候选解读用的 LLM 端点与「选股后自动重排」在
+            <button type="button" class="linklike" data-hubgo="ai">AI 服务</button> 标签页设置。</p>
+        </div>
+
+        <div class="card">
+          <details class="src-block" style="margin:0">
+            <summary><span>参数说明与执行注意事项</span><small>训练集 / 标签 / 重训节奏</small></summary>
+            <div class="src-body">
+              <dl class="set-doc">
+                <dt>训练集开始 / 结束日</dt>
+                <dd>样本区间。开始日越早样本越多，但 2019 年前的市场结构（注册制、涨跌幅、行业构成）和现在差得远，老样本会稀释信号；结束日留空＝跟到最新一个有标签的交易日，尾部「标签周期＋1」天必然留白，因为要等未来收益才能打标签。</dd>
+                <dt>标签周期</dt>
+                <dd>预测未来多少个交易日的收益。10 日约两周，噪声与换手比较平衡；1~3 日信噪比太差，60 日则样本高度重叠、等于同一段行情重复计数。</dd>
+                <dt>采样步长</dt>
+                <dd>每隔几个交易日取一期截面。步长小于标签周期时，相邻样本的标签区间重叠，IC 的独立性会下降；样本太少时调小步长能增加行数，但要接受这个偏差。</dd>
+                <dt>训练股票上限</dt>
+                <dd>每期抽多少只（等间隔取样，覆盖各交易所与市值段）。上限越大越慢，也越容易被大盘股主导；300 只是「约 6 万行样本」和「1 分钟训练」之间的折中。</dd>
+                <dt>标签口径</dt>
+                <dd>横截面分位（rank）只问「同期排第几」，天然抗极端收益，本机实测最优；全市场超额会被当日系统性涨跌带偏；行业内超额把行业 β 一并去掉，本样本期 RankIC 反而更低。</dd>
+              </dl>
+              <div class="doc-step">
+                <b><i>1</i>构造训练集</b>
+                <p>把每期横截面拼成「日期 × 股票 × 因子 → 未来收益」的长表，落到 data/dataset.csv。只读本地缓存、不联网；它决定模型能看到什么，所以改了上面任何一个参数都要重跑。</p>
+              </div>
+              <div class="doc-step">
+                <b><i>2</i>训练 LightGBM</b>
+                <p>按时间顺序 75/25 切分：前 75% 拟合、后 25% 验证，绝不随机打乱（随机切分会让未来信息漏进训练）。产出 RankIC、IR 与特征重要度，模型落盘后选股立即生效，无需重启。</p>
+              </div>
+              <div class="doc-step">
+                <b><i>3</i>重算快照</b>
+                <p>只算「当期」这一期截面（24 个因子 + 行业列），不含标签、不联网，十几秒完成。选股每次读的就是它，所以行情一动就该重算，但不必重训模型。</p>
+              </div>
+              <ul class="set-tips">
+                <li><b>别追着净值重训。</b>按月一次足够。重训后 RankIC 在 ±0.02 内来回跳是噪声，不是「模型变强了 / 变差了」。</li>
+                <li><b>改了因子必须重训。</b>因子集升级后旧模型的推理列对不上新快照，面板会提示「因子漂移」，那时模型只按自己记住的旧列打分。</li>
+                <li><b>训练集落后 2~3 个交易日是正常的</b>，尾部要等未来收益；落后超过 25 个交易日才需要重建。</li>
+                <li><b>训练期间选股不会出错</b>，只是仍用旧模型打分；模型文件是原子替换，不会读到写了一半的参数。</li>
+                <li><b>样本太少时别信 IC。</b>不足 2 万行、截面不足 100 期，RankIC 与胜率的波动比信号本身大，先在「股票池」多补些行情。</li>
+              </ul>
+              <p class="hint">打分与解读仅供个人研究，不构成投资建议。</p>
+            </div>
+          </details>
+        </div>
+      </div>
+
+      <!-- 回测默认 -->
+      <div class="hub-pane" data-hubtab="backtest">
+        <div class="card">
+          <div class="scr-table-head">
+            <div>
+              <h3>回测成本与资金</h3>
+              <p class="cap">这里的值直接用于回测与参数扫描，改完下一次运行立即生效，不需要另点保存。</p>
+            </div>
+          </div>
+          <div class="scr-form">
+            <div class="field"><label>初始资金（元）</label><input id="capital" type="number" step="1000" value="100000"></div>
+            <div class="field"><label>佣金率（‰，最低 5 元）</label><input id="commission" type="number" step="0.01" value="0.25"></div>
+            <div class="field"><label>印花税（‰，仅卖出）</label><input id="stamp_tax" type="number" step="0.01" value="0.5"></div>
+            <div class="field"><label>滑点（‰，单边）</label><input id="slippage" type="number" step="0.01" value="0.5"></div>
+          </div>
+          <p class="hint" style="margin-top:8px">过户费 0.01‰、涨跌停 ±10%、100 股一手、T+1 已内建。运行入口仍在「回测总览 / 参数扫描」页顶的参数条。</p>
+        </div>
+      </div>
+
+      <!-- 数据源 -->
+      <div class="hub-pane" data-hubtab="sources">
+        <div class="card">
+          <div class="scr-table-head">
+            <div>
+              <h3>账号型数据源</h3>
+              <p class="cap">免登录源已覆盖行情 / 名单 / 行业；以下两项只在你已有 Key 时可增强数据。凭据仅存本机，界面只显示打码值。</p>
+            </div>
+          </div>
+
+          <details class="src-block" open>
+            <summary><span>Tushare Pro</span><span class="pill no" id="hubSrcPill">未配置</span><small>PE / PB / 市值 / 换手 / 量比</small></summary>
+            <div class="src-body">
+              <div class="inline">
+                <input id="hubSrcToken" type="password" placeholder="粘贴 Tushare Token" autocomplete="off">
+                <button class="btn sm" id="btnHubSrcSave">保存</button>
+                <button class="btn sec sm" id="btnHubSrcTest">测试</button>
+                <button class="btn sec sm" id="btnHubSrcClear">清除</button>
+              </div>
+              <div class="inline" style="margin-top:9px">
+                <button class="btn sm" id="btnHubSrcFetch">拉取最新估值</button>
+                <label class="chk"><input type="checkbox" id="hubSrcForce"> 强制重拉</label>
+                <span class="hint" id="hubSrcStatus">未配置</span>
+              </div>
+              <p class="note" id="hubSrcNote">Token 仅存本机 data/sources.json；权限不足时原样返回提示，不伪造数据。每次拉取会把当日总市值累积到 data/extra/mv_history.csv，供训练端做行业 + 市值中性化。</p>
+            </div>
+          </details>
+
+          <details class="src-block">
+            <summary><span>东方财富自选股</span><span class="pill no" id="acctStatus">未配置</span><small>只读同步自选股，不含持仓与成交</small></summary>
+            <div class="src-body">
+              <div class="inline">
+                <input id="acctKey" type="password" placeholder="粘贴 MX_APIKEY（mkt_…）" autocomplete="off">
+                <button class="btn sm" id="btnAcctSave">保存</button>
+                <button class="btn sec sm" id="btnAcctClear">清除</button>
+              </div>
+              <div class="inline" style="margin-top:9px">
+                <select id="acctMode" style="width:auto;min-width:150px">
+                  <option value="merge">合并到股票池</option>
+                  <option value="replace">替换股票池</option>
+                </select>
+                <button class="btn sm" id="btnAcctSync">同步</button>
+              </div>
+              <p class="note" id="acctNote">Key 仅存本机 data/account.json。不保存密码、不模拟登录、不调用写接口。真实持仓与成交记录不在该接口范围内。</p>
+            </div>
+          </details>
+        </div>
+      </div>
+
+      <!-- 实盘账户 -->
+      <div class="hub-pane" data-hubtab="real">
+        <div class="card">
+          <div class="scr-table-head">
+            <div>
+              <h3>东方财富证券账号</h3>
+              <p class="cap">通过 <b>emtl</b> 登录东财证券交易网关（jywg.18.cn），只读取资金、持仓、委托、成交与资金流水，不提供任何下单入口。</p>
+            </div>
+          </div>
+          <div class="scr-form">
+            <div class="field"><label>资金账号</label><input type="text" id="rtUser" autocomplete="username" placeholder="东财证券资金账号"></div>
+            <div class="field"><label>交易密码</label><input type="password" id="rtPass" autocomplete="current-password" placeholder="不修改请留空"></div>
+          </div>
+          <p class="hint">密码用本机派生密钥加密后写入 <code>data/emt.json</code>，换机器解不开需重填；接口只返回掩码账号，不回传密码。</p>
+          <div class="inline" style="margin-top:10px">
+            <button class="btn sm" id="btnRtSave">保存并试连</button>
+            <button class="btn sec sm" id="btnRtLogout">退出登录</button>
+          </div>
+          <p class="note" id="rtCfgMsg"></p>
+        </div>
+
+        <div class="card">
+          <div class="scr-table-head">
+            <div>
+              <h3>自动刷新与收盘日结</h3>
+              <p class="cap">交易时段内低频刷新资金与持仓，页面看到的是当前账户而不是昨天的快照；收盘后再日结一次，给账本留下正式日快照。</p>
+            </div>
+          </div>
+          <p class="hint">emtl 不内置节流，东财网关也没有公开的频率上限，因此默认 <b>5 分钟</b>一次、复用同一登录会话，失败按 15/45/60 分钟退避。</p>
+          <div class="inline" style="margin-bottom:6px">
+            <label class="chk"><input type="checkbox" id="rtAutoRefresh" checked> 交易时段自动刷新</label>
+            <label>每 <select id="rtRefreshMin">
+              <option value="1">1</option><option value="2">2</option>
+              <option value="5" selected>5</option><option value="10">10</option>
+              <option value="15">15</option><option value="30">30</option>
+            </select> 分钟</label>
+            <span class="hint" id="rtRefreshState">—</span>
+          </div>
+          <p class="note" id="rtRefreshMsg"></p>
+          <div class="inline" style="margin-top:10px">
+            <label class="chk"><input type="checkbox" id="rtAutoSync"> 每个交易日收盘后日结</label>
+            <input type="time" id="rtAutoTime" value="15:35">
+            <span class="hint">补当天成交，留正式日快照</span>
+          </div>
+          <p class="note" id="rtAutoMsg"></p>
+        </div>
+
+        <div class="card">
+          <div class="scr-table-head">
+            <div>
+              <h3>历史数据回流</h3>
+              <p class="cap">emtl 能直接查历史成交 / 历史订单 / 资金流水，不用再手工导交割单。按月切片拉，条数达上限会标出来。</p>
+            </div>
+          </div>
+          <div class="inline" style="margin-bottom:8px">
+            <label class="rt-date">起始<input type="date" id="rtHistFrom"></label>
+            <label class="rt-date">截止<input type="date" id="rtHistTo"></label>
+          </div>
+          <div class="inline" style="margin-top:8px">
+            <label class="chk"><input type="checkbox" id="rtHistTrades" checked> 成交</label>
+            <label class="chk"><input type="checkbox" id="rtHistOrders" checked> 委托</label>
+            <label class="chk"><input type="checkbox" id="rtHistFlows" checked> 流水</label>
+            <button class="btn sm" id="btnRtPull">开始拉取</button>
+            <button class="btn sec sm" id="btnRtProbe">字段诊断</button>
+          </div>
+          <p class="note" id="rtHistMsg">默认拉最近 12 个月。已经拉过的区间不会重复写入（按成交编号去重）。</p>
+          <pre class="rt-probe" id="rtProbeOut" hidden></pre>
+        </div>
+
+        <div class="card">
+          <details class="src-block" style="margin:0">
+            <summary><span>口径与能力边界</span><small>收益口径 / 费用 / 历史数据限制</small></summary>
+            <div class="src-body">
+              <dl class="set-doc">
+                <dt>资金曲线两个收益口径</dt>
+                <dd><b>总资产涨跌</b>含出入金；<b>剔除出入金</b>是逐日扣掉当日净转账后连乘（TWR）。转钱进来那天曲线会跳，别用总资产涨跌判断自己做得好不好。</dd>
+                <dt>净入金</dt>
+                <dd>资金流水里「银行转证券」为 +、「证券转银行」为 −。分红、利息算收益，<b>不算出入金</b>，否则收益率会被自己的分红低估。</dd>
+                <dt>真实费用 vs 估算</dt>
+                <dd>成交回报里带佣金/印花税/过户费时直接用真实值；只有委托没带回费用时才按 万2.5 / 最低5元 / 印花税 0.05% / 过户费 0.001% 估算，界面会标出「估算 N 笔」。</dd>
+                <dt>胜率 / 盈亏比</dt>
+                <dd>把所有成交按 FIFO 配对成「平仓笔」：每笔卖出配最早的买入成本，费用按份额摊薄。没卖出过的仓位不计入胜率。</dd>
+                <dt>撤单率 / 滑点</dt>
+                <dd>来自历史委托。撤单率 = 已撤 ÷ 总委托；滑点 = 成交均价相对委托价的不利偏差（买贵/卖便宜为正），只统计有成交的委托。</dd>
+                <dt>年化换手</dt>
+                <dd>成交额 ÷ 平均总资产 ÷ 样本天数 × 244。<b>样本不足 5 个交易日不外推</b>，否则三天的成交能算出几万百分比。</dd>
+              </dl>
+              <ul class="set-tips">
+                <li><b>历史要自己拉</b>：emtl 有 <code>query_history_trades</code> / <code>query_funds_flow</code>，但单次查询有条数上限，所以按月切片；<b>拉过一次就落盘</b>，以后只补增量。</li>
+                <li><b>成本价只有快照能给</b>：成交明细能算出成交流水，但券商摊薄后的成本价（含分红送转调整）只有当日持仓接口返回，所以每日快照仍然要留。</li>
+                <li><b>不碰真钱</b>：本模块只调用查询方法，<code>create_order</code> / <code>cancel_order</code> 从未被 import，界面上也没有下单按钮。</li>
+                <li><b>字段名靠别名匹配</b>：东财没公开这些接口的字段字典，解析用候选别名（Cjrq / Cjsl / Fse ...）。若出现「未识别字段」，点「字段诊断」能看到原始字段名，补一个别名即可。</li>
+                <li><b>分红送转仍不全</b>：资金流水能拿到现金分红与红利税，但<b>送转股</b>不产生现金流，只有持仓快照里的数量变化能反映。</li>
+                <li><b>仅供个人复盘</b>：不构成投资建议，也不验证任何策略的有效性。</li>
+              </ul>
+            </div>
+          </details>
+        </div>
+      </div>
+
+      <!-- AI 服务 -->
+      <div class="hub-pane" data-hubtab="ai">
+        <div class="card">
+          <div class="scr-table-head">
+            <div>
+              <h3>LLM 接口 <span class="pill no" id="hubLlmPill">未配置</span></h3>
+              <p class="cap">同一份配置供选股重排与实盘复盘使用。支持任何 OpenAI 兼容接口；不填时全部退回本地规则。</p>
+            </div>
+          </div>
+          <div class="scr-form">
+            <div class="field"><label>Base URL</label><input id="hubLlmUrl" type="text" placeholder="https://api.example.com/v1"></div>
+            <div class="field"><label>API Key（仅存本机）</label><input id="hubLlmKey" type="password" placeholder="留空保留原值"></div>
+            <div class="field"><label>模型名</label><input id="hubLlmModel" type="text" placeholder="deepseek-chat"></div>
+            <div class="field"><label>最大输出 tokens（0=自动）</label><input id="hubLlmMaxTokens" type="number" min="0" max="8000" value="0"></div>
+          </div>
+          <div class="inline">
+            <label class="check"><input type="checkbox" id="hubLlmEnabled"> 启用</label>
+            <button class="btn sec sm" id="btnHubLlmSave">保存</button>
+            <button class="btn sec sm" id="btnHubLlmTest">测试</button>
+            <button class="opb del" id="btnHubLlmClear" type="button">清除 Key</button>
+          </div>
+          <p class="note" id="hubLlmNote"></p>
+          <div id="hubLlmDiag"></div>
+        </div>
+
+        <div class="card">
+          <div class="scr-table-head">
+            <div>
+              <h3>复盘 AI</h3>
+              <p class="cap">行为体检与复盘日记各自独立切换：本地规则不走网络；AI 模式在收盘日结后自动生成，也保留手动生成。</p>
+            </div>
+          </div>
+          <div class="hub-ai-row">
+            <div class="hub-ai-item">
+              <b>行为体检</b>
+              <div class="rt-seg" id="hubAiHealth" role="group" aria-label="行为体检模式">
+                <button type="button" data-mode="local">本地规则</button>
+                <button type="button" data-mode="ai">AI 体检</button>
+              </div>
+            </div>
+            <div class="hub-ai-item">
+              <b>复盘日记</b>
+              <div class="rt-seg" id="hubAiJournal" role="group" aria-label="复盘日记模式">
+                <button type="button" data-mode="local">本地模板</button>
+                <button type="button" data-mode="ai">AI 撰写</button>
+              </div>
+            </div>
+          </div>
+          <label class="check" style="margin-top:10px"><input type="checkbox" id="hubAiAuto"> 每个交易日收盘后自动生成</label>
+          <p class="note" id="hubAiNote"></p>
+          <p class="hint">AI 只发送账本聚合数据（总资产、盈亏、仓位、成交统计、持仓与已平仓股票名称/代码），不发送资金账号、密码、委托编号、成交编号与完整流水。手写日记不会被自动覆盖。</p>
+        </div>
+
+        <div class="card">
+          <div class="scr-table-head">
+            <div>
+              <h3>选股重排</h3>
+              <p class="cap">候选榜的「一眼理由」可由 LLM 语义复核；关闭自动重排后，仍可点候选榜上的「LLM 解读」手动触发。</p>
+            </div>
+          </div>
+          <label class="check"><input type="checkbox" id="scrAutoLlm"> 选股后自动 LLM 重排</label>
+          <p class="hint">不填 LLM 也能用：候选榜会退回本地规则生成解读，不会伪装成大模型结论。</p>
+        </div>
+      </div>
+
+      <!-- 更新记录 -->
+      <div class="hub-pane" data-hubtab="runs">
+        <div class="card">
+          <div class="scr-table-head">
+            <div><h3>更新记录</h3><p class="cap">流水线、各页快捷与定时任务统一日志，最新在前。</p></div>
+            <div class="btn-row" style="margin:0"><button class="btn sec sm" id="btnHubRuns">刷新</button></div>
+          </div>
+          <div class="scroll" style="max-height:520px;overflow-y:auto">
+            <table class="pool-table hub-runs">
+              <thead><tr><th>时间</th><th>类型</th><th>触发</th><th>结果</th><th>耗时</th><th>步骤 / 说明</th></tr></thead>
+              <tbody id="hubRunsBody"></tbody>
+            </table>
+          </div>
+          <div class="empty" id="hubRunsEmpty" style="display:none">还没有更新记录。点「数据链 → 更新到最新」或各页快捷按钮后会出现在这里。</div>
+        </div>
+      </div>
+    </section>
+
     <!-- ===================== 行业 ===================== -->
     <section class="panel" data-panel="ind">
       <div class="card">
@@ -585,7 +875,7 @@
 
       <div class="card">
         <h3>行业强度</h3>
-        <p class="cap">20 日等权涨幅，只统计本地已有行情的成分股。样本不足的行业不做外推。</p>
+        <p class="cap">20 日等权涨幅，只统计本地已有行情的成分股。强度随行情更新自动重算，不需要单独同步；行业分类建议每季度同步一次。</p>
         <div id="indChart" class="chart" style="height:320px"></div>
       </div>
 
@@ -621,12 +911,12 @@
     <section class="panel" data-panel="pool">
       <!-- 三块内容各占一屏，改成页签：一次只看一件事，不用一路往下滚 -->
       <div class="ptabs" role="tablist" aria-label="股票池分类">
-        <button class="ptab on" role="tab" aria-selected="true" data-ptab="mine">我的股票池 <i id="ptabN_mine">—</i></button>
-        <button class="ptab" role="tab" aria-selected="false" data-ptab="all">全 A 名单 <i id="ptabN_all">—</i></button>
-        <button class="ptab" role="tab" aria-selected="false" data-ptab="src">可选账号数据源</button>
+        <button class="ptab on" role="tab" aria-selected="true" data-ptab="all">全 A 名单 <i id="ptabN_all">—</i></button>
+        <button class="ptab" role="tab" aria-selected="false" data-ptab="mine">我的股票池 <i id="ptabN_mine">—</i></button>
+        <button class="ptab" role="tab" aria-selected="false" data-ptab="src">账户数据源</button>
       </div>
 
-      <div class="ptab-panel on" data-ptabbody="mine">
+      <div class="ptab-panel" data-ptabbody="mine">
       <div class="card">
         <div class="scr-table-head">
           <div><h3>我的股票池</h3><p class="cap" id="poolMeta">—</p></div>
@@ -650,7 +940,48 @@
       </div>
       </div><!-- /mine -->
 
-      <div class="ptab-panel" data-ptabbody="all">
+      <div class="ptab-panel on" data-ptabbody="all">
+      <div class="uni-top">
+        <div class="card" id="bulkCard">
+          <h3>全市场行情下载</h3>
+          <p class="cap">baostock 后复权 · 沪深；北交所走腾讯</p>
+          <p class="hint" style="margin:0 0 10px">首次「全量补全」建 5578 只，约 1 小时，可随时停止、可续跑；之后每交易日点一次「增量更新」约 8 分钟。</p>
+          <div class="inline">
+            <button class="btn sm" id="btnBulkInc">增量更新</button>
+            <button class="btn sec sm" id="btnBulkFull">全量补全</button>
+            <button class="btn sec sm" id="btnBulkStop">停止</button>
+            <input id="bulkLimit" type="number" placeholder="限量" min="1" style="max-width:100px;flex:0 0 auto" aria-label="限量">
+            <input id="bulkWorkers" type="number" value="6" min="1" max="8" title="并行进程数，建议 6" style="max-width:84px;flex:0 0 auto" aria-label="并行进程数">
+          </div>
+          <div class="bulk-confirm" id="bulkConfirm" hidden>
+            <span id="bulkConfirmText">—</span>
+            <span class="bc-btns">
+              <button class="btn sm" id="btnBulkYes">开始下载</button>
+              <button class="btn sec sm" id="btnBulkNo">取消</button>
+            </span>
+          </div>
+          <div class="bulk-prog" id="bulkProg" hidden>
+            <div class="bp-top"><b id="bpTitle">下载</b><span id="bpPct">0%</span></div>
+            <div class="bp-bar"><span id="bpFill"></span></div>
+            <div class="bp-meta" id="bpMeta">—</div>
+          </div>
+          <p class="hint" id="bulkStatus" style="margin:9px 0 0">—</p>
+        </div>
+        <div class="card">
+          <div class="scr-table-head">
+            <div><h3>更新历史</h3><p class="cap" id="uniHistMeta">行情下载与名单刷新记录，最新在前。</p></div>
+            <div class="btn-row" style="margin:0"><button class="btn sec sm" id="btnUniRuns">刷新</button></div>
+          </div>
+          <div class="scroll" style="max-height:300px;overflow-y:auto">
+            <table class="pool-table hub-runs">
+              <thead><tr><th>时间</th><th>类型</th><th>触发</th><th>结果</th><th>耗时</th><th>说明</th></tr></thead>
+              <tbody id="uniRunsBody"></tbody>
+            </table>
+          </div>
+          <div class="empty" id="uniRunsEmpty" style="display:none">还没有行情下载或名单刷新记录。</div>
+        </div>
+      </div>
+
       <div class="card">
         <h3>全 A 名单 <span class="pill yes">免登录</span></h3>
         <p class="cap" id="uniMeta">—</p>
@@ -685,74 +1016,18 @@
           <button class="btn sec sm" id="btnUniNext">下一页</button>
         </div>
 
-        <div class="subcard" id="bulkCard">
-          <h4>全市场行情下载 <span class="hint" style="margin:0">baostock 后复权 · 沪深；北交所走腾讯</span></h4>
-          <p class="hint" style="margin:3px 0 9px">首次「全量补全」建 5578 只，约 1 小时，可随时停止、可续跑；之后每交易日点一次「增量更新」约 8 分钟。</p>
-          <div class="inline">
-            <button class="btn sm" id="btnBulkInc">增量更新</button>
-            <button class="btn sec sm" id="btnBulkFull">全量补全</button>
-            <button class="btn sec sm" id="btnBulkStop">停止</button>
-            <input id="bulkLimit" type="number" placeholder="限量" min="1" style="max-width:100px;flex:0 0 auto" aria-label="限量">
-            <input id="bulkWorkers" type="number" value="6" min="1" max="8" title="并行进程数，建议 6" style="max-width:84px;flex:0 0 auto" aria-label="并行进程数">
-          </div>
-          <div class="bulk-confirm" id="bulkConfirm" hidden>
-            <span id="bulkConfirmText">—</span>
-            <span class="bc-btns">
-              <button class="btn sm" id="btnBulkYes">开始下载</button>
-              <button class="btn sec sm" id="btnBulkNo">取消</button>
-            </span>
-          </div>
-          <div class="bulk-prog" id="bulkProg" hidden>
-            <div class="bp-top"><b id="bpTitle">下载</b><span id="bpPct">0%</span></div>
-            <div class="bp-bar"><span id="bpFill"></span></div>
-            <div class="bp-meta" id="bpMeta">—</div>
-          </div>
-          <p class="hint" id="bulkStatus" style="margin:9px 0 0">—</p>
-        </div>
         <p class="note" id="uniNote">名单缓存于 data/universe.csv，与交易所口径可能略有差异，不含退市标识。</p>
       </div>
       </div><!-- /all -->
 
       <div class="ptab-panel" data-ptabbody="src">
-      <div class="card">
-        <h3>可选账号数据源</h3>
-        <p class="cap">免登录源已覆盖行情、名单与行业，不填也能全功能使用。以下两项只在你已有 Key 时可增强数据。</p>
-
-        <details class="src-block">
-          <summary><span>Tushare Pro</span><span class="pill no" id="srcPill">未配置</span><small>补齐 PE / PB / 市值 / 换手 / 量比</small></summary>
-          <div class="src-body">
-            <div class="inline">
-              <input id="srcToken" type="password" placeholder="粘贴 Tushare Token" autocomplete="off">
-              <button class="btn sm" id="btnSrcSave">保存</button>
-              <button class="btn sec sm" id="btnSrcTest">测试</button>
-              <button class="btn sec sm" id="btnSrcClear">清除</button>
-            </div>
-            <div class="inline" style="margin-top:9px">
-              <button class="btn sm" id="btnSrcFetch">拉取最新估值</button>
-              <span class="hint" id="srcStatus">未配置</span>
-            </div>
-            <p class="note" id="srcNote">Token 仅存本机 data/sources.json，界面只显示打码值；权限不足时原样返回提示，不伪造数据。</p>
-          </div>
-        </details>
-
-        <details class="src-block">
-          <summary><span>东方财富自选股</span><span class="pill no" id="acctStatus">未配置</span><small>只读同步自选股，不含持仓与成交</small></summary>
-          <div class="src-body">
-            <div class="inline">
-              <input id="acctKey" type="password" placeholder="粘贴 MX_APIKEY（mkt_…）" autocomplete="off">
-              <button class="btn sm" id="btnAcctSave">保存</button>
-              <button class="btn sec sm" id="btnAcctClear">清除</button>
-            </div>
-            <div class="inline" style="margin-top:9px">
-              <select id="acctMode" style="width:auto;min-width:150px">
-                <option value="merge">合并到股票池</option>
-                <option value="replace">替换股票池</option>
-              </select>
-              <button class="btn sm" id="btnAcctSync">同步</button>
-            </div>
-            <p class="note" id="acctNote">Key 仅存本机 data/account.json。不保存密码、不模拟登录、不调用写接口。真实持仓与成交记录不在该接口范围内。</p>
-          </div>
-        </details>
+      <div class="card hub-jump">
+        <h3>账户数据源已并入数据中枢</h3>
+        <p class="cap">Tushare Token 与东财自选股统一在「数据中枢 → 数据源」维护；本页只保留入口，避免两处表单各改一半。</p>
+        <div class="inline">
+          <button class="btn sm" id="btnPoolToHub" type="button">打开数据中枢 · 数据源</button>
+        </div>
+        <p class="hint" style="margin-top:8px">免登录源已覆盖行情、名单与行业，不填同样能全功能使用。</p>
       </div>
       </div><!-- /src -->
     </section>
@@ -766,7 +1041,7 @@
           <span class="rt-dot" id="rtDot" aria-hidden="true"></span>
           <div class="rt-bar-txt">
             <b id="rtWho">未配置账户</b>
-            <span class="hint" id="rtWhen">配置东财账号后，每个交易日收盘自动同步一次</span>
+            <span class="hint" id="rtWhen">配置东财账号后，交易时段自动刷新，收盘后日结一次</span>
           </div>
         </div>
         <div class="rt-bar-r">
@@ -882,8 +1157,16 @@
       <div class="card">
         <div class="scr-table-head">
           <h3>行为体检</h3>
-          <span class="hint">命中规则才列，不打分、不做仓位建议</span>
+          <div class="rt-head-tools">
+            <span class="hint">命中规则才列，不打分、不做仓位建议</span>
+            <div class="rt-seg" id="rtHealthMode" role="group" aria-label="行为体检模式">
+              <button type="button" data-mode="local">本地规则</button>
+              <button type="button" data-mode="ai">AI 体检</button>
+            </div>
+            <button class="btn sm sec" id="btnRtHealthGen" type="button">生成</button>
+          </div>
         </div>
+        <div class="rt-ai-note" id="rtHealthNote"></div>
         <div id="rtDiag" class="rt-diag"></div>
       </div>
 
@@ -900,100 +1183,63 @@
       <div class="card">
         <div class="scr-table-head">
           <h3>复盘日记</h3>
-          <span class="hint" id="rtJDay"></span>
+          <div class="rt-head-tools">
+            <span class="hint" id="rtJDay"></span>
+            <button class="btn sec sm" id="btnRtJBook" type="button">打开日记本 ↗</button>
+            <div class="rt-seg" id="rtJMode" role="group" aria-label="复盘日记模式">
+              <button type="button" data-mode="local">本地模板</button>
+              <button type="button" data-mode="ai">AI 撰写</button>
+            </div>
+          </div>
         </div>
-        <textarea id="rtJournal" rows="4" placeholder="今天做对了什么、哪里违规了、明天开盘前要先处理什么…"></textarea>
+        <div class="rt-ai-note" id="rtJNote"></div>
+        <textarea id="rtJournal" rows="8" placeholder="今天做对了什么、哪里违规了、明天开盘前要先处理什么…"></textarea>
         <div class="inline" style="margin-top:8px">
           <button class="btn sm" id="btnRtSaveJ">保存日记</button>
+          <button class="btn sec sm" id="btnRtGenJ" type="button">生成</button>
           <span class="hint" id="rtJMsg">按账本最近交易日存，可与当日持仓、归因一起回看</span>
         </div>
       </div>
 
     </section>
 
-    <!-- 账户设置抽屉 -->
-    <div class="drawer-mask" id="rtDrawerMask" hidden></div>
-    <aside class="drawer" id="rtDrawer" aria-hidden="true" aria-label="实盘账户设置">
-      <div class="drawer-head">
-        <h3>实盘账户设置</h3>
-        <button class="drawer-x" id="btnRtDrawerClose" aria-label="关闭">✕</button>
+    <!-- ===================== 复盘日记 ===================== -->
+    <section class="panel" data-panel="journal">
+      <div class="card jn-head">
+        <div>
+          <h3>复盘日记</h3>
+          <p class="hint">一天一篇，按日期存成 Markdown：<code>data/journal/YYYY-MM-DD.md</code>。front matter 只记日期、来源与时间，正文可直接写标题、列表等 Markdown。</p>
+        </div>
+        <div class="jn-head-r">
+          <span class="jn-stat" id="jnStat">正在读取…</span>
+          <button class="btn sm" id="btnJnNew" type="button">写今天</button>
+        </div>
       </div>
-      <div class="drawer-body">
-        <section class="set-sec">
-          <div class="set-head"><h4>东方财富证券账号</h4></div>
-          <p class="hint">通过 <b>emtl</b> 登录东财证券交易网关（jywg.18.cn），只读取资金、持仓、委托、成交与资金流水，<b>不提供任何下单入口</b>。</p>
-          <div class="field"><label>资金账号</label><input type="text" id="rtUser" autocomplete="username" placeholder="东财证券资金账号"></div>
-          <div class="field"><label>交易密码</label><input type="password" id="rtPass" autocomplete="current-password" placeholder="不修改请留空"></div>
-          <p class="hint">密码用本机派生密钥加密后写入 <code>data/emt.json</code>，换机器解不开需重填；接口只返回掩码账号，不回传密码。</p>
-          <div class="inline" style="margin-top:10px">
-            <button class="btn sm" id="btnRtSave">保存并试连</button>
-            <button class="btn sec sm" id="btnRtLogout">退出登录</button>
+      <div class="jn-split">
+        <aside class="card jn-side">
+          <div class="jn-side-h"><b>按日存档</b><span id="jnCount"></span></div>
+          <div class="jn-list" id="jnList"></div>
+        </aside>
+        <div class="card jn-main">
+          <div class="jn-main-h">
+            <div class="jn-datebox">
+              <input type="date" id="jnDay" aria-label="日记日期">
+              <span class="jn-src" id="jnSrc"></span>
+            </div>
+            <div class="jn-actions">
+              <span class="jn-dirty" id="jnDirty"></span>
+              <button class="btn sm" id="btnJnSave" type="button">保存</button>
+              <button class="btn sec sm danger" id="btnJnDelete" type="button">删除</button>
+            </div>
           </div>
-          <p class="note" id="rtCfgMsg"></p>
-        </section>
-
-        <section class="set-sec">
-          <div class="set-head"><h4>自动同步</h4></div>
-          <p class="hint">收盘后拉一次账户快照存进账本。每天最多一次、失败不重试 —— 东财账号连续登录失败会被锁，宁可少一天快照也不冒这个险。</p>
-          <div class="inline">
-            <label class="chk"><input type="checkbox" id="rtAutoSync"> 每个交易日自动同步</label>
-            <input type="time" id="rtAutoTime" value="15:35">
-            <span class="hint">收盘定盘价出来后</span>
+          <textarea id="jnText" spellcheck="false" placeholder="今天做对了什么、哪里违规了、明天开盘前要先处理什么…&#10;&#10;支持 Markdown：# 小标题、- 列表、**加粗**"></textarea>
+          <div class="jn-foot">
+            <span id="jnMeta">选一天开始记录，或点「写今天」</span>
+            <span id="jnChars">0 字</span>
           </div>
-          <p class="note" id="rtAutoMsg"></p>
-        </section>
-
-        <section class="set-sec">
-          <div class="set-head"><h4>历史数据回流</h4></div>
-          <p class="hint">emtl 能直接查<b>历史成交 / 历史订单 / 资金流水</b>，不用再手工导交割单。按月切片拉，条数达上限会标出来。</p>
-          <div class="inline" style="margin-bottom:8px">
-            <label class="rt-date">起始<input type="date" id="rtHistFrom"></label>
-            <label class="rt-date">截止<input type="date" id="rtHistTo"></label>
-          </div>
-          <div class="inline" style="margin-top:8px">
-            <label class="chk"><input type="checkbox" id="rtHistTrades" checked> 成交</label>
-            <label class="chk"><input type="checkbox" id="rtHistOrders" checked> 委托</label>
-            <label class="chk"><input type="checkbox" id="rtHistFlows" checked> 流水</label>
-            <button class="btn sm" id="btnRtPull">开始拉取</button>
-            <button class="btn sec sm" id="btnRtProbe">字段诊断</button>
-          </div>
-          <p class="note" id="rtHistMsg">默认拉最近 12 个月。已经拉过的区间不会重复写入（按成交编号去重）。</p>
-          <pre class="rt-probe" id="rtProbeOut" hidden></pre>
-        </section>
-
-        <section class="set-sec">
-          <div class="set-head"><h4>这些数字怎么来的</h4></div>
-          <dl class="set-doc">
-            <dt>资金曲线两个收益口径</dt>
-            <dd><b>总资产涨跌</b>含出入金；<b>剔除出入金</b>是逐日扣掉当日净转账后连乘（TWR）。转钱进来那天曲线会跳，别用总资产涨跌判断自己做得好不好。</dd>
-            <dt>净入金</dt>
-            <dd>资金流水里「银行转证券」为 +、「证券转银行」为 −。分红、利息算收益，<b>不算出入金</b>，否则收益率会被自己的分红低估。</dd>
-            <dt>真实费用 vs 估算</dt>
-            <dd>成交回报里带佣金/印花税/过户费时直接用真实值；只有委托没带回费用时才按 万2.5 / 最低5元 / 印花税 0.05% / 过户费 0.001% 估算，界面会标出「估算 N 笔」。</dd>
-            <dt>胜率 / 盈亏比</dt>
-            <dd>把所有成交按 FIFO 配对成「平仓笔」：每笔卖出配最早的买入成本，费用按份额摊薄。没卖出过的仓位不计入胜率。</dd>
-            <dt>撤单率 / 滑点</dt>
-            <dd>来自历史委托。撤单率 = 已撤 ÷ 总委托；滑点 = 成交均价相对委托价的不利偏差（买贵/卖便宜为正），只统计有成交的委托。</dd>
-            <dt>年化换手</dt>
-            <dd>成交额 ÷ 平均总资产 ÷ 样本天数 × 244。<b>样本不足 5 个交易日不外推</b>，否则三天的成交能算出几万百分比。</dd>
-            <dt>行为体检</dt>
-            <dd>集中度、单票上限、现金缓冲、亏损集中、短持有亏损、盈亏比结构、费用占比、撤单率、滑点 —— 只做规则命中，不打分、不给买卖建议。</dd>
-          </dl>
-        </section>
-
-        <section class="set-sec">
-          <div class="set-head"><h4>能力边界</h4></div>
-          <ul class="set-tips">
-            <li><b>历史要自己拉</b>：emtl 有 <code>query_history_trades</code> / <code>query_funds_flow</code>，但单次查询有条数上限，所以按月切片；<b>拉过一次就落盘</b>，以后只补增量。</li>
-            <li><b>成本价只有快照能给</b>：成交明细能算出成交流水，但券商摊薄后的成本价（含分红送转调整）只有当日持仓接口返回，所以每日快照仍然要留。</li>
-            <li><b>不碰真钱</b>：本模块只调用查询方法，<code>create_order</code> / <code>cancel_order</code> 从未被 import，界面上也没有下单按钮。</li>
-            <li><b>字段名靠别名匹配</b>：东财没公开这些接口的字段字典，解析用候选别名（Cjrq / Cjsl / Fse ...）。若出现「未识别字段」，点「字段诊断」能看到原始字段名，补一个别名即可。</li>
-            <li><b>分红送转仍不全</b>：资金流水能拿到现金分红与红利税，但<b>送转股</b>不产生现金流，只有持仓快照里的数量变化能反映。</li>
-            <li><b>仅供个人复盘</b>：不构成投资建议，也不验证任何策略的有效性。</li>
-          </ul>
-        </section>
+        </div>
       </div>
-    </aside>
+    </section>
 
     <!-- ===================== 关于 ===================== -->
     <section class="panel" data-panel="about">
@@ -1052,6 +1298,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20261118k"></script>
+<script src="/static/app.js?v=20261119ai"></script>
 </body>
 </html>
