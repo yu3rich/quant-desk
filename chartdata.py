@@ -261,6 +261,121 @@ def kline(code: str, period: str = "day") -> dict:
     return _cache_put(ck, out)
 
 
+# --------------------------------------------------------------------------
+# 大盘指数条：一次请求拿五个指数，盘中 8 秒缓存
+# --------------------------------------------------------------------------
+
+INDEX_SYMBOLS = (
+    ("sh000001", "上证指数"),
+    ("sz399001", "深证成指"),
+    ("sz399006", "创业板指"),
+    ("bj899050", "北证50"),
+    ("sh000688", "科创50"),
+)
+INDEX_TTL = 8
+_INDEX_CACHE: dict = {"at": 0.0, "data": None}
+# 指数卡右侧迷你走势：单独缓存 60 秒，避免 8 秒一次的报价刷新反复打 5 个分时接口
+_SPARK_TTL = 60
+_SPARK_CACHE: dict[str, tuple[float, list]] = {}
+
+
+def _spark_points(key: str, limit: int = 48) -> list[float]:
+    hit = _SPARK_CACHE.get(key)
+    if hit and time.time() - hit[0] < _SPARK_TTL:
+        return hit[1]
+    try:
+        d = _get("%s/appstock/app/minute/query?code=%s" % (BASE, key), timeout=8)
+        node = d.get(key) or {}
+        rows = ((node.get("data") or {}).get("data")) or []
+        parsed = _parse_minutes(rows)
+        pts = [round(v[0], 3) for _, v in sorted(parsed.items())]
+        # 241 个分钟点塞进 64px 的小图没有意义，等距抽到 48 个
+        if len(pts) > limit:
+            step = (len(pts) - 1) / float(limit - 1)
+            pts = [pts[int(round(i * step))] for i in range(limit)]
+        _SPARK_CACHE[key] = (time.time(), pts)
+        return pts
+    except Exception:
+        return hit[1] if hit else []
+
+
+def _idx_time(raw: str) -> str:
+    """'20261119100115' → '10:01:15'。"""
+    s = str(raw or "")
+    return "%s:%s:%s" % (s[8:10], s[10:12], s[12:14]) if len(s) >= 14 else ""
+
+
+def indices(ttl: int = INDEX_TTL) -> dict:
+    """五个主要指数的最新点位与涨跌幅。失败时返回上一次成功结果（如有）。"""
+    now = time.time()
+    hit = _INDEX_CACHE.get("data")
+    if hit and now - float(_INDEX_CACHE.get("at") or 0) < ttl:
+        return hit
+    q = ",".join(code for code, _ in INDEX_SYMBOLS)
+    try:
+        r = requests.get("https://qt.gtimg.cn/q=" + q, headers=HDR, timeout=8)
+        r.raise_for_status()
+        r.encoding = "gbk"
+        text = r.text
+    except Exception as e:
+        if hit:
+            return hit
+        return {"ok": False, "error": ("指数行情读取失败：%s" % str(e)[:120])}
+
+    raw = {}
+    for line in text.split(";"):
+        line = line.strip()
+        if not line.startswith("v_") or "=" not in line:
+            continue
+        try:
+            name, body = line.split("=", 1)
+            raw[name[2:]] = body.strip().strip('"').split("~")
+        except Exception:
+            continue
+
+    def f(p, i):
+        try:
+            return float(p[i])
+        except Exception:
+            return None
+
+    out = []
+    for code, label in INDEX_SYMBOLS:
+        p = raw.get(code) or []
+        if len(p) < 35:
+            continue
+        price = f(p, 3)
+        if price is None:
+            continue
+        pre = f(p, 4)
+        pct = f(p, 32)
+        if pct is None and pre:
+            pct = round((price / pre - 1) * 100, 2)
+        out.append({"code": code, "name": p[1] or label,
+                    "price": price, "pre_close": pre,
+                    "change": f(p, 31), "pct": pct,
+                    "high": f(p, 33), "low": f(p, 34),
+                    "time": _idx_time(p[30] if len(p) > 30 else "")})
+    if not out:
+        if hit:
+            return hit
+        return {"ok": False, "error": "指数行情暂时没有返回数据"}
+    # 右侧迷你走势：5 个分时接口并行走，首次约几百毫秒，之后 60 秒内直接复用
+    sparks = {}
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        codes = [x["code"] for x in out]
+        with ThreadPoolExecutor(max_workers=len(codes)) as ex:
+            sparks = dict(zip(codes, ex.map(_spark_points, codes)))
+    except Exception:
+        sparks = {}
+    for x in out:
+        x["spark"] = sparks.get(x["code"]) or []
+    data = {"ok": True, "list": out, "at": time.strftime("%H:%M:%S")}
+    _INDEX_CACHE.update(at=now, data=data)
+    return data
+
+
 def get(code: str, period: str = "day") -> dict:
     period = str(period or "day").lower()
     if period in ("min", "1min", "today", "fenshi", "分时"):

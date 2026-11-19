@@ -61,6 +61,7 @@ def _fetch_chunk(keys: list[str]) -> dict[str, dict]:
                 continue
             out[code] = {
                 "code": code, "name": p[1].strip(), "price": p[3], "pct": p[32],
+                "prev_close": p[4],
                 "open": p[5], "high": p[33], "low": p[34],
                 "volume": p[36], "amount": p[37], "turnover": p[38], "time": p[30],
             }
@@ -122,6 +123,64 @@ def _f(v):
         return float(v)
     except Exception:
         return 0.0
+
+
+def prev_closes(codes: list[str]) -> dict[str, dict]:
+    """批量取「真实昨收 / 现价 / 行情日期」。
+
+    腾讯字段 4 = 昨收（真实价，未复权），字段 3 = 现价，字段 30 = 行情时间
+    （yyyymmddHHMMSS）。拿这三个数就能把本地后复权价换算回真实价：
+    复权因子 = 真实昨收 ÷ 后复权收盘（同一交易日），两次除权之间因子不变。
+    返回 {code: {"prev_close": float, "price": float, "qdate": "yyyymmdd"}}。
+    """
+    keys = [f"{_prefix(c)}{c}" for c in codes if _prefix(c)]
+    keys = list(dict.fromkeys(keys))
+    out: dict[str, dict] = {}
+    if not keys:
+        return out
+    try:
+        with cf.ThreadPoolExecutor(max_workers=4) as ex:
+            futs = [ex.submit(_fetch_chunk, ch) for ch in _chunks(keys, 60)]
+            for fu in cf.as_completed(futs):
+                try:
+                    got = fu.result()
+                except Exception:
+                    continue
+                for code, r in got.items():
+                    pc, px, qt = _f(r.get("prev_close")), _f(r.get("price")), str(r.get("time") or "")
+                    if pc <= 0 and px <= 0:
+                        continue
+                    out[code] = {"prev_close": pc if pc > 0 else None,
+                                 "price": px if px > 0 else None,
+                                 "qdate": qt[:8] if len(qt) >= 8 else ""}
+    except Exception:
+        return out
+    return out
+
+
+def real_price(hfq_close: float, hfq_last: float, last_date: str, q: dict | None) -> float | None:
+    """把某日的后复权收盘换算成该日的真实成交价。
+
+    hfq_last / last_date 是本地缓存的最新一根已收盘 bar；q 是 prev_closes 的一条。
+    行情日期等于缓存最新日时用现价（收盘后现价≈定盘价），否则用昨收
+    （昨收正好是「缓存最新日」的真实收盘 —— 盘中昨收不会变成当天）。
+    两次除权之间因子恒定，因此对更早的历史日期同样成立。
+    """
+    if not q or not hfq_close or not hfq_last or hfq_last <= 0:
+        return None
+    ref = None
+    qd = str(q.get("qdate") or "")
+    ld = str(last_date or "").replace("-", "")
+    if qd and ld and qd == ld:
+        ref = q.get("price")
+    if not ref:
+        ref = q.get("prev_close")
+    if not ref or ref <= 0:
+        return None
+    try:
+        return round(float(hfq_close) * float(ref) / float(hfq_last), 2)
+    except Exception:
+        return None
 
 
 def load() -> dict[str, dict]:

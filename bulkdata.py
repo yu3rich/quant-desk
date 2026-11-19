@@ -33,8 +33,7 @@ import pandas as pd
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
-CACHE = DATA / "cache"
-CACHE.mkdir(parents=True, exist_ok=True)
+CACHE = DATA / "cache"          # 旧 CSV 缓存目录，仅作 store.py 首次迁移来源
 CONFIG = BASE / "config.json"
 UNIVERSE = DATA / "universe.csv"
 # 最近一次行情任务用的数据源（降级/限流提示要跨进程重启保留）
@@ -78,6 +77,23 @@ def market_kind(code: str) -> str:
     return ""
 
 
+def is_stock_code(code: str, exchange: str | None = None) -> bool:
+    """是否 A 股个股。给了 exchange（sh/sz/bj）就按交易所前缀严格判定 ——
+    这样才能区分同一 6 位码的指数与股票：sh.000300 是沪深300指数、sz.000001 是平安银行，
+    只看代码会把两者混为一谈。"""
+    c = str(code).zfill(6)
+    ex = str(exchange or "").lower()
+    if c.startswith(("900", "200")):          # B 股
+        return False
+    if ex == "sh":
+        return c.startswith(("60", "68"))      # 沪市个股：主板 60x / 科创板 68x
+    if ex == "sz":
+        return c.startswith(("000", "001", "002", "003", "300", "301"))
+    if ex == "bj":
+        return c.startswith(("43", "83", "87", "92")) or c[0] == "8"
+    return market_kind(c) != ""
+
+
 def to_bs_code(code: str) -> str | None:
     """baostock 代码（sh.600000 / sz.000001）；北交所返回 None（走腾讯）。"""
     k = market_kind(code)
@@ -112,44 +128,27 @@ def _norm(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _read_meta(code: str) -> dict:
-    p = CACHE / f"{code}.json"
-    if not p.exists():
-        return {}
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    import store
+    return store.meta_of(code)
 
 
 def _read_csv(code: str) -> pd.DataFrame | None:
-    p = CACHE / f"{code}.csv"
-    if not p.exists():
+    import store
+    d = store.bars_frame(code)
+    if d is None:
         return None
-    try:
-        d = _norm(pd.read_csv(p, dtype={"date": str}))
-        return d if len(d) else None
-    except Exception:
-        return None
+    d = _norm(d)
+    return d if len(d) else None
 
 
 def _write(code: str, df: pd.DataFrame, source: str, basis: str, start: str | None = None):
-    """原子写：先写临时文件再替换，避免快照/回测读到写了一半的 CSV。
+    """整只事务覆盖写（SQLite 原子提交，快照/回测不会读到半截数据）。
 
     start 记录「这份缓存是按哪个起始日建的全量」，下次全量补全就能判断是否可以
     只追加尾部（新股上市晚，首根 K 线不等于 cache_start，只能靠这个字段判断）。
     """
-    import os
-    df = df[COLS]
-    tmp = CACHE / f"{code}.csv.tmp"
-    df.to_csv(tmp, index=False, encoding="utf-8")
-    os.replace(tmp, CACHE / f"{code}.csv")
-    meta = {"code": code, "updated": _today(), "source": source, "basis": basis,
-            "rows": int(len(df)), "last_date": str(df["date"].iloc[-1])}
-    if start:
-        meta["start"] = str(start)[:10]
-    mtmp = CACHE / f"{code}.json.tmp"
-    mtmp.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-    os.replace(mtmp, CACHE / f"{code}.json")
+    import store
+    store.bars_write(code, df[COLS], source, basis, start)
 
 
 # --------------------------------------------------------------------------
@@ -168,7 +167,12 @@ def _last_trade_day(bs, lookback: int = 20) -> str:
 
 
 def list_hs() -> dict[str, str]:
-    """沪深全 A 名单（过滤上证/深证指数、基金、债券，只留 60/68/00/001-003/300/301）。"""
+    """沪深全 A 名单（只留个股：sh 60/68、sz 000/001/002/003/300/301）。
+
+    baostock 的 query_all_stock 同时返回指数与个股，且同一 6 位码可能既是指数又是股票
+    （如 sh.000001 上证指数 / sz.000001 平安银行）。必须用返回的交易所前缀判定，
+    只看代码位数会把 sh.000xxx 这类上证指数当成深市个股混进来。
+    """
     import baostock as bs
     lg = bs.login()
     if lg.error_code != "0":
@@ -179,8 +183,11 @@ def list_hs() -> dict[str, str]:
         while rs.error_code == "0" and rs.next():
             row = rs.get_row_data()
             full, status, name = row[0], row[1], row[2]
-            code = full.split(".")[-1]
-            if market_kind(code) in ("sh", "sz") and len(code) == 6:
+            parts = full.split(".")
+            if len(parts) != 2:
+                continue
+            ex, code = parts[0], parts[1]
+            if len(code) == 6 and is_stock_code(code, ex):
                 out[code] = (name or code).strip().replace(" ", "")
         return out
     finally:
@@ -336,8 +343,8 @@ def _cal_recent(n: int = 12) -> list[str]:
 def _spot_bar(code: str, row: dict, bar_day: str, prev_day: str):
     """把一只股票的当日快照合成为后复权 K 线并追加到缓存尾部。"""
     import histcache
-    p = CACHE / f"{code}.csv"
-    if not p.exists():
+    import store
+    if not store.has_code(code):
         return "empty", 0, "无本地缓存，需全量下载"
     meta = _read_meta(code)
     if str(meta.get("basis") or "") != "hfq":
@@ -378,19 +385,11 @@ def _spot_bar(code: str, row: dict, bar_day: str, prev_day: str):
         "pct": "%.4f" % pct, "turnover": "%.4f" % turn,
     }
     try:
-        txt = p.read_text(encoding="utf-8")
-        if not txt.endswith("\n"):
-            txt += "\n"
-        tmp = CACHE / (code + ".csv.tmp")
-        tmp.write_text(txt + ",".join(bar[c] for c in COLS) + "\n", encoding="utf-8")
-        os.replace(tmp, p)
+        store.bars_append(code, bar, {**meta, "updated": _today(), "last_date": bar_day,
+                                      "basis": "hfq", "source": "腾讯快照补日线",
+                                      "rows": int(meta.get("rows") or 0) + 1})
     except Exception as e:                        # noqa: BLE001
         return "fail", 0, "写入失败：" + str(e)[:50]
-    meta.update({"updated": _today(), "last_date": bar_day, "basis": "hfq",
-                 "source": "腾讯快照补日线", "rows": int(meta.get("rows") or 0) + 1})
-    mt = CACHE / (code + ".json.tmp")
-    mt.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-    os.replace(mt, CACHE / (code + ".json"))
     return "ok", 1, ""
 
 
@@ -405,15 +404,10 @@ def spot_window() -> tuple[bool, str]:
 
 
 def _codes_missing(codes: list[str], day: str) -> list[str]:
-    """挑出缓存还没更新到 day 的代码（只读 meta json，5000 只约 0.6 秒）。"""
-    import concurrent.futures as cf
-
-    def _one(c):
-        return c if str(_read_meta(c).get("last_date") or "")[:10] < day else None
-
-    with cf.ThreadPoolExecutor(max_workers=8) as ex:
-        got = list(ex.map(_one, codes))
-    return [c for c in got if c]
+    """挑出缓存还没更新到 day 的代码（一条 SQL 取全部 meta，毫秒级）。"""
+    import store
+    mm = store.meta_map()
+    return [c for c in codes if str((mm.get(c) or {}).get("last_date") or "")[:10] < day]
 
 
 def _spot_topup(codes: list[str], tally: bool = True, note: str = "") -> dict:
@@ -452,6 +446,11 @@ def _spot_topup(codes: list[str], tally: bool = True, note: str = "") -> dict:
             row = rows.get(c)
             if not row:
                 results.append({"code": c, "st": "skip", "n": 0, "err": "快照里没有这只"})
+                continue
+            # merge=True 会保留未参与本次刷新的旧行；旧行的时间戳不是今天时绝不能
+            # 当成今天这根 K 线写入，否则会把昨天的涨跌复制到今天。
+            if str(row.get("time") or "")[:8] != stamp:
+                results.append({"code": c, "st": "skip", "n": 0, "err": "快照不是当日"})
                 continue
             futs[ex.submit(_spot_bar, c, row, bar_day, prev_day)] = c
         for fu in cf.as_completed(futs):
@@ -856,10 +855,23 @@ def _run(codes: list[str], mode: str, workers: int = 1):
     # 降级路径的完成文案里带着「补了哪天」，别被一句「完成」盖掉
     if not _STATE["stop"] and _STATE.get("source") == "baostock":
         _STATE["message"] = "完成"
+    # 各页快捷触发的增量单独落一条统一更新记录；流水线内部调用传 log=False，
+    # 由 pipeline 整段落库，避免同一次更新记两遍。
+    if _STATE.get("_log", True):
+        try:
+            import store
+            okf = not _STATE.get("error") and not _STATE.get("stop")
+            ms = int((time.time() - float(_STATE.get("started_at") or time.time())) * 1000)
+            detail = str(_STATE.get("message") or "")[:200]
+            store.run_log("quote", okf,
+                          steps=[{"name": "增量行情", "ok": okf, "ms": ms, "detail": detail}],
+                          trigger="shortcut", error=str(_STATE.get("error") or "")[:300], ms=ms)
+        except Exception:
+            pass
 
 
 def start(mode: str = "incremental", limit: int | None = None, scope: str = "all",
-          workers: int | None = None) -> dict:
+          workers: int | None = None, log: bool = True) -> dict:
     if _STATE["running"]:
         s = status()
         s["ok"] = False
@@ -869,8 +881,11 @@ def start(mode: str = "incremental", limit: int | None = None, scope: str = "all
     codes = _codes(scope)
     if limit:
         # 限量时优先处理「未缓存」和「最久未更新」的股票，保证每次限量都能扩大覆盖
+        import store
+        mm = store.meta_map()
+
         def _prio(c):
-            m = _read_meta(c)
+            m = mm.get(c)
             return (0, "") if not m else (1, m.get("last_date", ""))
         codes = sorted(codes, key=_prio)[:int(limit)]
     if not codes:
@@ -881,6 +896,7 @@ def start(mode: str = "incremental", limit: int | None = None, scope: str = "all
     if workers is None:
         workers = int(_cfg().get("bulk_workers", 6) or 6)
     workers = max(1, min(8, int(workers)))
+    _STATE["_log"] = bool(log)
     threading.Thread(target=_run, args=(codes, mode, workers), daemon=True).start()
     return {"ok": True, "started": len(codes), "mode": mode, "scope": scope,
             "workers": workers}
@@ -921,25 +937,37 @@ def _save_source() -> None:
 
 
 def status() -> dict:
-    cached = len(list(CACHE.glob("*.csv")))
-    uni = 0
+    import store
+    uni_codes: set[str] = set()
     if UNIVERSE.exists():
         try:
             import csv
             with UNIVERSE.open("r", encoding="utf-8-sig", newline="") as f:
-                uni = sum(1 for r in csv.DictReader(f) if r.get("code"))
+                uni_codes = {r["code"] for r in csv.DictReader(f) if r.get("code")}
         except Exception:
-            uni = 0
+            uni_codes = set()
+    have = set(store.cached_codes())
+    # 缓存里还留着退市/改码的旧代码，覆盖率只按当前名单算，避免出现 100% 以上的怪数
+    cached = len(uni_codes & have) if uni_codes else len(have)
+    uni = len(uni_codes)
     st = {k: v for k, v in _STATE.items() if k != "stop"}
+    # ok 在状态里是「成功只数」，与接口通用的 ok=true 冲突；分开成 ok_count，
+    # 否则前端 if (!s.ok) 会永远提前返回，页面刷新后进度和空闲状态都显示不出来。
+    ok_n = int(st.pop("ok", 0) or 0)
     done, total = int(st.get("done") or 0), int(st.get("total") or 0)
     elapsed = float(st.get("elapsed") or 0)
     # 只按「真正需要下载的」算速率：跳过已缓存的股票几乎不花时间，
     # 若把它们算进去，ETA 会先显示 3 分钟、随后跳成 1 小时。
-    dl = int(st.get("ok") or 0) + int(st.get("fail") or 0)
+    dl = ok_n + int(st.get("fail") or 0)
     rate = round(dl / elapsed, 2) if elapsed > 2 and dl > 0 else 0.0
-    left = max(0, uni - cached) if uni else max(0, total - done)
-    eta = int(round(left / rate)) if rate > 0 and left > 0 else 0
-    return {"ok": True, **st, "rate": rate, "eta": eta,
+    # 剩余量按「本次任务的 total」算，不能按全市场 uni-cached：
+    # 限量更新（只跑 500 只）时后者会把 ETA 放大十倍以上。
+    left = max(0, total - done) if total else max(0, uni - cached)
+    # ETA 用「处理进度」速率而不是纯下载速率：跳过已缓存股票也计入 done，
+    # 增量更新时绝大多数是秒级跳过，用下载速率会把剩余时间估得离谱地长。
+    proc_rate = round(done / elapsed, 2) if elapsed > 2 and done > 0 else 0.0
+    eta = int(round(left / proc_rate)) if proc_rate > 0 and left > 0 else 0
+    return {"ok": True, **st, "ok_count": ok_n, "rate": rate, "eta": eta,
             "cached_total": cached, "universe_total": uni,
             "cover": round(cached / uni * 100, 2) if uni else 0.0}
 

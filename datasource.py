@@ -36,6 +36,10 @@ DATA = BASE / "data"
 EXTRA = DATA / "extra"
 SOURCES = DATA / "sources.json"
 BASIC_CSV = EXTRA / "daily_basic.csv"
+# 历史估值累积：每次拉 daily_basic 都按交易日追加，训练端做市值中性化时用。
+# 只存总市值（亿元），单日一行一只；重复拉同一日期会覆盖该日旧值。
+MV_HISTORY = EXTRA / "mv_history.csv"
+HIST_FIELDS = ["trade_date", "code", "total_mv"]
 API = "https://api.tushare.pro"
 BASIC_FIELDS = ["code", "trade_date", "close", "pe", "pe_ttm", "pb",
                 "total_mv", "circ_mv", "turnover_rate", "volume_ratio", "name"]
@@ -102,6 +106,68 @@ def _mask(tok: str) -> str:
     return tok[:4] + "*" * max(4, len(tok) - 8) + tok[-4:]
 
 
+def _append_mv_history(date: str, rows: list[dict]) -> None:
+    """把某交易日总市值追加进历史文件；同日重拉时先删该日旧值再写。"""
+    date = str(date)[:8]
+    keep: list[dict] = []
+    if MV_HISTORY.exists():
+        try:
+            with MV_HISTORY.open("r", encoding="utf-8-sig", newline="") as f:
+                for r in csv.DictReader(f):
+                    if str(r.get("trade_date") or "") != date:
+                        keep.append(r)
+        except Exception:
+            keep = []
+    cur = []
+    for r in rows:
+        code = str(r.get("ts_code") or "")[:6]
+        try:
+            mv = float(r.get("total_mv") or 0)
+        except Exception:
+            continue
+        if len(code) != 6 or not math.isfinite(mv) or mv <= 0:
+            continue
+        cur.append({"trade_date": date, "code": code,
+                    "total_mv": round(mv / 10000, 4)})   # 万元 → 亿元
+    EXTRA.mkdir(parents=True, exist_ok=True)
+    tmp = MV_HISTORY.with_suffix(".csv.tmp")
+    with tmp.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=HIST_FIELDS)
+        w.writeheader()
+        for r in keep:
+            if r.get("code") and r.get("trade_date"):
+                w.writerow({k: r.get(k, "") for k in HIST_FIELDS})
+        w.writerows(cur)
+    tmp.replace(MV_HISTORY)
+
+
+def load_mv_history() -> dict[str, dict[str, float]]:
+    """交易日 → {代码: 总市值（亿元）}。训练端按「日期 + 代码」取，绝不跨期回填。"""
+    out: dict[str, dict[str, float]] = {}
+    if not MV_HISTORY.exists():
+        return out
+    try:
+        with MV_HISTORY.open("r", encoding="utf-8-sig", newline="") as f:
+            for r in csv.DictReader(f):
+                day = str(r.get("trade_date") or "")[:8]
+                code = str(r.get("code") or "").zfill(6)
+                try:
+                    mv = float(r.get("total_mv") or 0)
+                except Exception:
+                    continue
+                if len(day) == 8 and len(code) == 6 and math.isfinite(mv) and mv > 0:
+                    out.setdefault(day, {})[code] = mv
+    except Exception:
+        return {}
+    return out
+
+
+def mv_history_status() -> dict:
+    days = load_mv_history()
+    return {"days": len(days), "rows": sum(len(v) for v in days.values()),
+            "from": min(days) if days else "", "to": max(days) if days else ""}
+
+
 def call(api_name: str, params: dict | None = None, fields: str = "") -> list[dict]:
     """直连 Tushare Pro；失败抛 RuntimeError（带原始 msg，便于定位权限问题）。"""
     tok = token()
@@ -143,12 +209,32 @@ def test() -> dict:
         return {"ok": False, "error": str(e)[:220]}
 
 
-def fetch_daily_basic(trade_date: str | None = None) -> dict:
-    """拉某个交易日的全市场估值。daily_basic 按 trade_date 一次返回全市场，1 次请求即可。"""
+def fetch_daily_basic(trade_date: str | None = None, force: bool = False) -> dict:
+    """拉某个交易日的全市场估值。daily_basic 按 trade_date 一次返回全市场，1 次请求即可。
+
+    同一交易日已拉过就直接复用本地 CSV（Tushare 按积分限频，重复拉纯烧配额）；
+    force=True 才重新请求。
+    """
     if not token():
         return {"ok": False, "error": "未配置 Token；估值数据需要 Tushare 权限"}
     try:
-        date = str(trade_date or "").replace("-", "") or latest_trade_date()
+        t = _ts()
+        date = str(trade_date or "").replace("-", "")
+        cached_ok = BASIC_CSV.exists() and int(t.get("rows") or 0) > 1000
+
+        def _reused(d):
+            return {"ok": True, "trade_date": d, "count": int(t["rows"]), "reused": True,
+                    "message": "%s 估值已在 %s 拉取（%d 只），直接复用本地；要重拉请勾选「强制重拉」"
+                               % (d, t.get("last_fetch") or "此前", int(t["rows"]))}
+
+        if not force and cached_ok:
+            if date and str(t.get("last_date") or "") == date:
+                return _reused(date)
+            # 未指定日期且今天拉过：直接复用，连 trade_cal 都不调
+            # （低积分账号 trade_cal 也限频 1 次/小时，复用路径必须零 API 调用）
+            if not date and str(t.get("last_fetch") or "")[:10] == dt.date.today().strftime("%Y-%m-%d"):
+                return _reused(str(t.get("last_date") or ""))
+        date = date or latest_trade_date()
         rows = call("daily_basic", {"trade_date": date},
                     "ts_code,trade_date,close,pe,pe_ttm,pb,total_mv,circ_mv,"
                     "turnover_rate,volume_ratio")
@@ -172,6 +258,11 @@ def fetch_daily_basic(trade_date: str | None = None) -> dict:
                     "volume_ratio": r.get("volume_ratio") or "", "name": "",
                 })
         tmp.replace(BASIC_CSV)
+        try:
+            _append_mv_history(date, rows)
+        except Exception:
+            # 历史累积失败不能拖垮当期估值：当期 CSV 已写好，训练端会提示覆盖不足。
+            pass
         cfg = _read()
         t = dict(cfg.get("tushare") or {})
         t.update({"last_fetch": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -234,5 +325,6 @@ def status() -> dict:
             "token_masked": _mask(str(t.get("token") or "")),
             "last_fetch": t.get("last_fetch", ""), "last_date": last_date,
             "rows": rows, "file": str(BASIC_CSV),
+            "mv_history": mv_history_status(),
             "available": ["daily_basic（PE/PB/市值/换手/量比）"],
             "note": "Token 仅存本机 data/sources.json；权限取决于你的 Tushare 积分"}

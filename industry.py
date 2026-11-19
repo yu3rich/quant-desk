@@ -42,7 +42,6 @@ import pandas as pd
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
-CACHE = DATA / "cache"
 UNIVERSE = DATA / "universe.csv"
 INDUSTRY_CSV = DATA / "industry.csv"
 META_JSON = DATA / "industry.json"
@@ -119,6 +118,14 @@ def _digits(s) -> str:
     return "".join(ch for ch in str(s) if ch.isdigit()).zfill(6)[:6]
 
 
+def _int(v) -> int:
+    """「5,123」「5123.0」这类值安全转 int；解析失败按 0，不让一行脏数据毁掉整次同步。"""
+    try:
+        return int(float(str(v).replace(",", "").strip()))
+    except Exception:
+        return 0
+
+
 # --------------------------------------------------------------------------
 # 三个数据源
 # --------------------------------------------------------------------------
@@ -137,7 +144,7 @@ def _fetch_sw() -> tuple[dict[str, str], list[str], dict[str, dict]]:
             continue
         meta[name] = {
             "pe": r.get("TTM(滚动)市盈率"), "pb": r.get("市净率"),
-            "dividend": r.get("静态股息率"), "expect": int(r.get("成份个数") or 0),
+            "dividend": r.get("静态股息率"), "expect": _int(r.get("成份个数")),
         }
         try:
             d = ak.index_component_sw(symbol=code.split(".")[0])
@@ -345,6 +352,17 @@ def sync(force: bool = False) -> dict:
         _STRENGTH.update(at=0.0, data=[], day="")   # 行业归属变了，强度缓存作废
         _SYNC.update(running=False, message="完成", progress="",
                      done_at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        try:
+            import store
+            res = _SYNC.get("result") or {}
+            okf = bool(res.get("ok", True))
+            ms = int((time.time() - float(_SYNC.get("started") or time.time())) * 1000)
+            store.run_log("industry", okf,
+                          steps=[{"name": "行业分类", "ok": okf, "ms": ms,
+                                  "detail": str(res.get("error") or res.get("message") or "")[:200]}],
+                          trigger="shortcut", error=str(res.get("error") or "")[:300], ms=ms)
+        except Exception:
+            pass
 
 
 def sync_async(force: bool = True) -> dict:
@@ -360,7 +378,8 @@ def sync_async(force: bool = True) -> dict:
 
 def _cached_codes() -> set[str]:
     try:
-        return {p.stem for p in CACHE.glob("*.csv")}
+        import store
+        return set(store.cached_codes())
     except Exception:
         return set()
 
@@ -386,7 +405,8 @@ def strength(ttl: int = 300) -> dict[str, dict]:
         return {x["industry"]: x for x in disk["data"]}
 
     m = load_map()
-    codes = [c for c in m if histcache.path_of(c).exists()]
+    have = _cached_codes()
+    codes = [c for c in m if c in have]
     # 只要两个收盘价和 5 个换手率，用 numpy 数组就够，别为这点数字建 DataFrame
     got = histcache.bulk_ohlcv(codes, 30, workers=6)
     agg: dict[str, list] = {}

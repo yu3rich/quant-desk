@@ -24,8 +24,6 @@ import numpy as np
 import pandas as pd
 
 BASE = Path(__file__).resolve().parent
-CACHE_DIR = BASE / "data" / "cache"
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_PATH = BASE / "config.json"
 
 COLS = ["date", "open", "high", "low", "close", "volume", "amount", "pct", "turnover"]
@@ -44,6 +42,16 @@ def load_config() -> dict:
         except Exception:
             pass
     return {}
+
+
+def save_config(patch: dict) -> dict:
+    """合并写回 config.json（只覆盖传入的顶层键，其余如 stocks 原样保留）。"""
+    cur = load_config()
+    cur.update({k: v for k, v in (patch or {}).items()})
+    tmp = CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cur, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(CONFIG_PATH)
+    return cur
 
 
 def stock_name(code: str, cfg: dict | None = None) -> str:
@@ -220,37 +228,25 @@ def fetch_history(code: str, cfg: dict | None = None) -> tuple[pd.DataFrame, str
 
 
 def _save_cache(code: str, d: pd.DataFrame, source: str, basis: str = "qfq"):
-    import os
-    tmp = CACHE_DIR / f"{code}.csv.tmp"
-    d.to_csv(tmp, index=False, encoding="utf-8")
-    os.replace(tmp, CACHE_DIR / f"{code}.csv")
-    mtmp = CACHE_DIR / f"{code}.json.tmp"
-    mtmp.write_text(json.dumps({
-        "code": code, "updated": dt.date.today().isoformat(),
-        "source": source, "basis": basis, "rows": int(len(d)),
-        "last_date": str(d["date"].iloc[-1]),
-    }, ensure_ascii=False), encoding="utf-8")
-    os.replace(mtmp, CACHE_DIR / f"{code}.json")
+    import store
+    store.bars_write(code, d, source, basis)
 
 
 def _read_cache(code: str) -> pd.DataFrame | None:
-    fp = CACHE_DIR / f"{code}.csv"
-    if not fp.exists():
+    import store
+    d = store.bars_frame(code)
+    if d is None:
         return None
     try:
-        return _normalize(pd.read_csv(fp, dtype={"date": str}))
+        return _normalize(d)
     except Exception:
         return None
 
 
 def cache_info(code: str) -> dict | None:
-    fp = CACHE_DIR / f"{code}.json"
-    if not fp.exists():
-        return None
-    try:
-        return json.loads(fp.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    import store
+    m = store.meta_of(code)
+    return m or None
 
 
 def _ref_price(code: str) -> float | None:

@@ -20,7 +20,6 @@ import requests
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
 DATA.mkdir(parents=True, exist_ok=True)
-CACHE_DIR = DATA / "cache"
 UNIVERSE_PATH = DATA / "universe.csv"
 
 FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
@@ -74,7 +73,8 @@ def _write(rows: list[dict]):
 
 def meta() -> dict:
     rows = _read()
-    cached = {p.stem for p in CACHE_DIR.glob("*.csv")}
+    import store
+    cached = set(store.cached_codes())
     return {"ok": True, "total": len(rows),
             "updated": rows[0].get("updated", "-") if rows else "-",
             "fresh": bool(rows and rows[0].get("updated") == _today()),
@@ -149,17 +149,39 @@ def _fetch_sina() -> dict[str, dict]:
     return out
 
 
+def _fetch_tushare() -> dict[str, str]:
+    """Tushare stock_basic：官方上市名单，一次请求，含北交所（baostock 不覆盖）。"""
+    import datasource
+    if not datasource.configured():
+        return {}
+    rows = datasource.call("stock_basic", {"list_status": "L"}, "ts_code,name")
+    out: dict[str, str] = {}
+    for r in rows:
+        c = str(r.get("ts_code") or "")[:6]
+        if len(c) == 6 and c.isdigit() and market_of(c) != "其他":
+            out[c] = str(r.get("name") or c).strip().replace(" ", "")
+    return out
+
+
 def fetch_all(force: bool = False) -> dict:
-    """刷新全 A 股名单：baostock 沪深为主（免限流），失败再回退东财/新浪。"""
+    """刷新全 A 股名单：Tushare（若配置，官方含北交所）→ baostock 沪深 → 东财/新浪。"""
     if not force and meta()["fresh"]:
         return {**meta(), "source": "本地缓存（当日）", "fetched": 0}
-    # 1) baostock 沪深名单（独立于东财 push2，不受其限流影响）
-    hs = {}
+    # 1) 一次请求拿全名单的源优先：Tushare 官方 > baostock（免限流但不含北交所）
+    hs, src_name = {}, ""
     try:
-        import bulkdata
-        hs = bulkdata.list_hs()
+        hs = _fetch_tushare()
+        if len(hs) > 3000:
+            src_name = "Tushare stock_basic（官方名单，含北交所）"
     except Exception:
         hs = {}
+    if len(hs) <= 3000:
+        try:
+            import bulkdata
+            hs = bulkdata.list_hs()
+            src_name = "baostock（沪深，免限流）+ 旧缓存（北交所）"
+        except Exception:
+            hs = {}
     if len(hs) > 3000:
         old = {r["code"]: r for r in _read()}
         merged = {}
@@ -168,12 +190,14 @@ def fetch_all(force: bool = False) -> dict:
             merged[c] = {"code": c, "name": name, "market": market_of(c),
                          "price": p.get("price", ""), "pct": p.get("pct", ""),
                          "updated": _today()}
-        for c, r in old.items():          # 保留 baostock 不含的北交所等旧行
-            if c not in merged:
+        # 旧行只保留 baostock 不覆盖的北交所；其余不在 hs 里的（多为上证指数，
+        # 如 sh.000300 沪深300、sh.000001 上证指数）一律丢弃，避免指数混进股票名单。
+        for c, r in old.items():
+            if c not in merged and market_of(c) == "北交所":
                 merged[c] = r
         rows = sorted(merged.values(), key=lambda x: x["code"])
         _write(rows)
-        return {**meta(), "source": "baostock（沪深，免限流）+ 旧缓存（北交所）",
+        return {**meta(), "source": src_name,
                 "fetched": len(rows), "hs": len(hs), "bj": len(rows) - len(hs)}
 
     # 2) 回退：东财 / 新浪
@@ -199,7 +223,8 @@ def fetch_all(force: bool = False) -> dict:
 
 def _filter(q: str, market: str, cached_only: bool) -> list[dict]:
     rows = _read()
-    cached = {p.stem for p in CACHE_DIR.glob("*.csv")}
+    import store
+    cached = set(store.cached_codes())
     q = (q or "").strip().lower()
     if q:
         rows = [r for r in rows if q in r["code"] or q in r["name"].lower()]
@@ -213,7 +238,8 @@ def _filter(q: str, market: str, cached_only: bool) -> list[dict]:
 def query(q: str = "", market: str = "all", cached_only: bool = False,
           limit: int = 100, offset: int = 0) -> dict:
     rows = _filter(q, market, cached_only)
-    cached = {p.stem for p in CACHE_DIR.glob("*.csv")}
+    import store
+    cached = set(store.cached_codes())
     page = rows[int(offset):int(offset) + int(limit)]
     # 叠加实时快照（新鲜时覆盖名单里的旧价，避免显示「隔日价」）
     sd, sp = {}, {}
@@ -301,8 +327,10 @@ def prewarm_start(limit: int = 200, only_in_pool: bool = False) -> dict:
     import watchlist
     pool = set(watchlist.codes()) if only_in_pool else None
     rows = _read()
+    import store
+    have = set(store.cached_codes())
     todo = [r["code"] for r in rows
-            if not (CACHE_DIR / (r["code"] + ".csv")).exists()
+            if r["code"] not in have
             and (pool is None or r["code"] in pool)]
     todo = todo[:int(limit)]
     if not todo:
