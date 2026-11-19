@@ -28,6 +28,9 @@ import pipeline
 import scheduler
 import emtlink
 import emtbook
+import emtai
+import store
+import journal
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -119,6 +122,33 @@ def fail(e):
     return jsonify({"ok": False, "error": str(e)})
 
 
+def _shortcut(kind: str, name: str, fn, data_day: str = ""):
+    """各页快捷单步操作：执行并把结果落进 store.runs（数据中枢统一更新记录）。
+
+    流水线整段更新由 pipeline.run 自己落库；这里只记各页按钮触发的单步，
+    trigger=shortcut 与流水线/定时任务区分开。异步任务（增量行情/行业）在各自
+    模块的完成点落库，不走这个同步包装。
+    """
+    import store
+    t0 = time.time()
+    try:
+        r = fn()
+        d = r if isinstance(r, dict) else {}
+        okf = bool(d.get("ok", True))
+        ms = int((time.time() - t0) * 1000)
+        detail = str(d.get("error") or d.get("message") or "")[:200]
+        store.run_log(kind, okf, steps=[{"name": name, "ok": okf, "ms": ms, "detail": detail}],
+                      trigger="shortcut", data_day=data_day,
+                      error=str(d.get("error") or "")[:300], ms=ms)
+        return r
+    except Exception as e:
+        ms = int((time.time() - t0) * 1000)
+        store.run_log(kind, False, steps=[{"name": name, "ok": False, "ms": ms,
+                                           "detail": str(e)[:200]}],
+                      trigger="shortcut", error=str(e)[:300], ms=ms)
+        raise
+
+
 @app.route("/")
 def index():
     return send_from_directory(WEB, "index.html")
@@ -138,7 +168,8 @@ def status():
             ak_ver = metadata.version("akshare")
         except Exception:
             ak_ver = "未安装"
-        cache_count = sum(1 for _ in (BASE / "data" / "cache").glob("*.csv"))
+        import store
+        cache_count = store.cached_count()
         return ok(python=sys.version.split()[0], akshare=ak_ver,
                   port=c.get("port", 8765), cache_count=cache_count,
                   akshare_broken=quant._AKSHARE_BROKEN, config=c)
@@ -232,6 +263,15 @@ def symbol_lookup():
         return fail(e)
 
 
+@app.route("/api/indices")
+def index_quotes():
+    """行情走势顶部的五个主要指数：上证 / 深证 / 创业板 / 北证 / 科创。"""
+    try:
+        return jsonify(chartdata.indices())
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:160]})
+
+
 @app.route("/api/chart")
 def chart_data():
     """行情看图：period = intraday / five / day / week / month（分时、五日、日、周、月）。
@@ -298,7 +338,8 @@ def universe_api():
 @app.route("/api/universe/refresh", methods=["POST"])
 def universe_refresh():
     try:
-        return jsonify(universe.fetch_all(force=True))
+        return jsonify(_shortcut("universe", "全 A 名单",
+                                 lambda: universe.fetch_all(force=True)))
     except Exception as e:
         return fail(e)
 
@@ -360,7 +401,8 @@ def spot_api():
             return jsonify(spot.status())
         b = request.get_json(silent=True) or {}
         if b.get("action") == "refresh":
-            return jsonify(spot.refresh(codes=b.get("codes") or None))
+            return jsonify(_shortcut("spot", "实时快照",
+                                     lambda: spot.refresh(codes=b.get("codes") or None)))
         return fail("未知操作：" + str(b.get("action")))
     except Exception as e:
         return fail(e)
@@ -391,12 +433,19 @@ def emt_config():
         if b.get("clear_password"):
             kw["password"] = ""
             kw["clear_password"] = True
-        for k in ("enabled", "auto_sync"):
+        for k in ("enabled", "auto_sync", "auto_refresh"):
             if k in b:
                 kw[k] = bool(b.get(k))
         if "auto_time" in b:
             kw["auto_time"] = str(b.get("auto_time") or "15:35")
-        emtlink.logout()          # 改了凭据就让旧会话失效
+        if "refresh_min" in b:
+            try:
+                kw["refresh_min"] = max(1, min(60, int(b.get("refresh_min") or 5)))
+            except Exception:
+                kw["refresh_min"] = 5
+        # 只有改凭据才丢会话；切自动刷新开关不该逼着下一次重新登录
+        if any(k in b for k in ("user", "password", "clear_password")):
+            emtlink.logout()
         emtlink.save_cfg(**kw)
         return jsonify(dict(emtlink.status(), ok=True))
     except Exception as e:
@@ -419,7 +468,8 @@ def emt_test():
 def emt_sync():
     try:
         b = request.get_json(silent=True) or {}
-        return jsonify(emtlink.sync(note=str(b.get("note") or "")))
+        return jsonify(_shortcut("ledger", "实盘同步",
+                                 lambda: emtlink.sync(note=str(b.get("note") or ""))))
     except Exception as e:
         return fail(e)
 
@@ -437,7 +487,9 @@ def emt_logout():
 def emt_board():
     try:
         days = int(request.args.get("days") or 180)
-        return jsonify(emtbook.board(days=days))
+        b = emtbook.board(days=days)
+        b["ai"] = emtai.state(b)          # 只读状态：不触发模型、不写盘
+        return jsonify(b)
     except Exception as e:
         return fail(e)
 
@@ -449,7 +501,70 @@ def emt_journal():
             return ok(day=request.args.get("day") or "",
                       journal=emtlink.journal_get(request.args.get("day") or ""))
         b = request.get_json(force=True) or {}
-        return jsonify(emtlink.journal_set(b.get("day") or "", b.get("text") or ""))
+        return jsonify(emtlink.journal_set(b.get("day") or "", b.get("text") or "",
+                                           src="manual"))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/journal", methods=["GET", "POST"])
+def journal_book():
+    """复盘日记本：一天一篇 Markdown。
+
+    GET  —— 列出 data/journal/*.md（日期倒序，带来源/字数/预览）
+    POST —— 保存某天（day + text），同一天再次保存原地覆盖
+    """
+    try:
+        if request.method == "GET":
+            journal.seed_from_ledger()   # 旧账本日记首次访问时迁成 .md
+            try:
+                limit = int(request.args.get("limit") or 500)
+            except Exception:
+                limit = 500
+            return jsonify(journal.list_entries(limit=max(1, min(limit, 2000))))
+        b = request.get_json(force=True) or {}
+        r = journal.save(b.get("day") or "", b.get("text") or "",
+                         src=str(b.get("src") or "manual"))
+        if r.get("ok"):
+            emtlink.journal_mirror(r.get("day") or "")   # 账本日存在时同步旧字段
+        return jsonify(r)
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/journal/<day>", methods=["GET", "DELETE"])
+def journal_entry(day):
+    """单日日记：GET 读取正文，DELETE 删除该文件。"""
+    try:
+        if request.method == "DELETE":
+            r = journal.delete(day)
+            if r.get("ok"):
+                emtlink.journal_clear(day)
+            return jsonify(r)
+        return jsonify(journal.read(day))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/emt/ai/config", methods=["GET", "POST"])
+def emt_ai_config():
+    """复盘 AI 开关：日记与体检各自独立选择 local / ai。"""
+    try:
+        if request.method == "GET":
+            return jsonify(emtai.status())
+        return jsonify(emtai.configure(request.get_json(force=True) or {}))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/emt/ai/generate", methods=["POST"])
+def emt_ai_generate():
+    """生成当日日记或行为体检。force=true 才会覆盖手写日记。"""
+    try:
+        b = request.get_json(silent=True) or {}
+        return jsonify(emtai.generate(kind=str(b.get("kind") or ""),
+                                      day=str(b.get("day") or ""),
+                                      force=bool(b.get("force"))))
     except Exception as e:
         return fail(e)
 
@@ -518,7 +633,15 @@ def screen_pipeline():
         level = str(b.get("level") or "auto")
         if level not in ("auto", "quick", "full"):
             level = "auto"
-        return jsonify(pipeline.run_async(level, bool(b.get("quote"))))
+        only = b.get("only")
+        if isinstance(only, list):
+            only = [str(x) for x in only if str(x) in ("quote", "snapshot", "dataset", "model")]
+        else:
+            only = None
+        workers = int(b["workers"]) if b.get("workers") else None
+        return jsonify(pipeline.run_async(level, bool(b.get("quote")),
+                                          trigger=str(b.get("trigger") or "manual"),
+                                          only=only, workers=workers))
     except Exception as e:
         return fail(e)
 
@@ -607,7 +730,76 @@ def sources_fetch():
     """拉取某个交易日的全市场估值（PE/PB/市值/换手/量比）。"""
     try:
         b = request.get_json(silent=True) or {}
-        return jsonify(datasource.fetch_daily_basic(b.get("trade_date")))
+        return jsonify(_shortcut("valuation", "全市场估值",
+                                 lambda: datasource.fetch_daily_basic(
+                                     b.get("trade_date"), force=bool(b.get("force")))))
+    except Exception as e:
+        return fail(e)
+
+
+# --------------------------------------------------------------------------
+# 数据中枢：统一配置 / 统一更新 / 更新记录（各页快捷仍保留，记录汇入此处）
+# --------------------------------------------------------------------------
+
+@app.route("/api/data/hub")
+def data_hub():
+    """一页聚合：数据链时效 + 定时任务 + 各数据源状态 + 并发参数 + 最近更新记录。"""
+    try:
+        c = cfg()
+        return ok(
+            freshness=pipeline.freshness(),
+            scheduler=scheduler.status(),
+            sources=datasource.status(),
+            emt=emtlink.status(),
+            llm=llm.status(),
+            bulk_workers=int(c.get("bulk_workers", 6) or 6),
+            runs=pipeline.history(40))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/data/run", methods=["POST"])
+def data_run():
+    """中枢统一更新：level=auto/quick/full，或 only 显式选段；后台跑，轮询 freshness。"""
+    try:
+        b = request.get_json(silent=True) or {}
+        level = str(b.get("level") or "auto")
+        if level not in ("auto", "quick", "full"):
+            level = "auto"
+        only = b.get("only")
+        if isinstance(only, list):
+            only = [str(x) for x in only if str(x) in ("quote", "snapshot", "dataset", "model")]
+            only = only or None
+        else:
+            only = None
+        workers = int(b["workers"]) if b.get("workers") else None
+        return jsonify(pipeline.run_async(level, bool(b.get("quote")),
+                                          trigger="manual", only=only, workers=workers))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/data/runs")
+def data_runs():
+    """统一更新记录（流水线 + 各页快捷 + 定时任务），最新在前。"""
+    try:
+        limit = max(1, min(int(request.args.get("limit", 60)), 200))
+        return ok(runs=pipeline.history(limit))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/data/config", methods=["POST"])
+def data_config():
+    """保存中枢里的全局参数（目前仅行情并发数 bulk_workers，1~8）。"""
+    try:
+        b = request.get_json(silent=True) or {}
+        patch = {}
+        if "bulk_workers" in b:
+            patch["bulk_workers"] = max(1, min(8, int(b.get("bulk_workers") or 6)))
+        if patch:
+            quant.save_config(patch)
+        return ok(bulk_workers=int(cfg().get("bulk_workers", 6) or 6))
     except Exception as e:
         return fail(e)
 
@@ -642,10 +834,21 @@ def screen_review():
 
 
 
-@app.route("/api/screen/picks")
+@app.route("/api/screen/picks", methods=["GET", "POST"])
 def screen_picks():
-    """选股记录：每次选股一个批次，含记录价、最新价与 T+N 后验。"""
+    """选股记录：每次选股一个批次，含记录价、最新价与 T+N 后验；POST 删除整批。"""
     try:
+        if request.method == "POST":
+            b = request.get_json(force=True) or {}
+            if b.get("action") != "delete":
+                return fail("未知操作：" + str(b.get("action")))
+            as_of = str(b.get("as_of") or "")[:10]
+            rec = str(b.get("recorded_at") or "")
+            if not as_of or not rec:
+                return fail("缺少批次标识（as_of / recorded_at）")
+            import store
+            n = store.picks_delete(as_of, rec)
+            return ok(deleted=n)
         return jsonify(review.picks_log(limit=int(request.args.get("limit", 40))))
     except Exception as e:
         return fail(e)
@@ -659,7 +862,7 @@ def screen_snapshot():
         return jsonify(screener.build_snapshot(
             scope=str(b.get("scope") or "cached"),
             as_of=(b.get("as_of") or None),
-            limit=int(b.get("limit") or 1500)))
+            limit=screener.norm_limit(b.get("limit"))))
     except Exception as e:
         return fail(e)
 
@@ -702,18 +905,27 @@ def screen_run():
         cap = screener.INDUSTRY_CAP_DEFAULT if cap is None else max(0, min(int(cap), 20))
         funnel_cfg = b.get("funnel") if isinstance(b.get("funnel"), dict) else None
         want_neutral = str(b.get("neutral") or "auto")
+        scope = str(b.get("scope") or "cached")
+        limit = screener.norm_limit(b.get("limit"))
+        want_as_of = str(b.get("as_of") or "")[:10]
 
         # 「优先复用」语义：有快照直接复用，没有才现建，避免首屏因缺缓存而空白报错
         snap_df, snap_meta = screener.load_snapshot() if b.get("reuse_snapshot") else (None, {})
-        # 磁盘快照若是历史截止日的产物，不能当「最新横截面」复用，必须现建
-        if snap_df is not None and str(snap_meta.get("as_of_param") or ""):
+        # 磁盘快照若是历史截止日的产物，不能当「最新横截面」复用，必须现建；
+        # 反过来，用户指定了历史截止日时也不能复用「最新」快照——否则截止日被静默忽略，
+        # 界面显示的是最新截面，和历史回看的结果对不上。
+        if snap_df is not None and (str(snap_meta.get("as_of_param") or "") or want_as_of):
             snap_df, snap_meta = None, {}
         # 快照过期（数据日落后于行情缓存）也不能复用，否则界面显示「已是最新」却拿着旧截面打分。
-        # 行情缓存只增不改，重算一次快照要 5 秒，这个校验只要 0.1 毫秒，没有理由省。
+        # 行情缓存只增不改，重算一次全市场快照要 7 秒左右，这个校验只要 0.1 毫秒，没有理由省。
         reused = False
         if snap_df is not None:
             latest = _latest_bar_day()
-            if latest and str(snap_meta.get("as_of") or "")[:10] != latest:
+            # 数据日之外，范围与样本上限也得一致：否则改了「全市场 / 上限」还复用
+            # 旧截面，界面上的样本数会停在上一组参数，看着像参数没生效。
+            same_cfg = (str(snap_meta.get("scope") or "cached") == scope
+                        and screener.norm_limit(snap_meta.get("limit")) == limit)
+            if (latest and str(snap_meta.get("as_of") or "")[:10] != latest) or not same_cfg:
                 snap_df, snap_meta = None, {}
             else:
                 reused = True
@@ -722,9 +934,9 @@ def screen_run():
             rows = screener._rows(snap_df)
         else:
             built = screener.build_snapshot(
-                scope=str(b.get("scope") or "cached"),
+                scope=scope,
                 as_of=b.get("as_of") or None,
-                limit=int(b.get("limit") or 1500))
+                limit=limit)
             if not built.get("ok"):
                 return jsonify(built)
             rows, snap_meta = built["rows"], built
@@ -748,7 +960,13 @@ def screen_run():
         sel = screener.select(kept, topn=topn, cap=cap)
         # 3) 落盘候选，交给 T+N 后验。首屏自动出数会带 record=False：
         #    那种跑法只是把界面填满，不是用户的一次选股，写进记录会污染历史。
-        if b.get("record", True):
+        # 历史截止日只用于回看，不能覆盖那一天的实盘候选记录：
+# 同 as_of 的记录是整期替换的，一次历史实验就会把真实留档冲掉。
+        latest_day = _latest_bar_day()
+        if b.get("record", True) and want_as_of and latest_day and want_as_of != latest_day:
+            rec = {"ok": True, "skipped": True,
+                   "note": "历史截止日回看，不计入选股记录"}
+        elif b.get("record", True):
             rec = screener.record_picks(sel["picked"], r.get("as_of", ""))
         else:
             rec = {"ok": True, "skipped": True, "note": "首屏自动出数，不计入选股记录"}
@@ -759,9 +977,32 @@ def screen_run():
                          "counts": sel["industry_counts"], "note": sel["note"],
                          "exposure": sel.get("exposure") or {}}
         r["record"] = rec
+        # 最近一次真正落盘的选股时间：前端据此判断「今天是否已经选过」，
+        # 避免只按数据日（天然滞后）判断而误亮「重新选股」的彩虹提醒。
+        try:
+            r["last_pick_at"] = str(store.picks_version()[1] or "")
+        except Exception:
+            r["last_pick_at"] = ""
         r["topn"] = topn
         r["count"] = len(kept)
         r["candidates"] = sel["picked"]
+        # 候选表的 close 是后复权价（因子口径），直接给人看会差出复权因子
+        # （罗曼股份 hfq 97.87 vs 真实 52）。用腾讯昨收/现价把展示价换算回真实价，
+        # 涨跌幅与收益口径不受影响（本就同口径相除）。
+        try:
+            import histcache
+            latest_day = _latest_bar_day()
+            qmap = spot.prev_closes([c["code"] for c in r["candidates"]])
+            for c in r["candidates"]:
+                q = qmap.get(c["code"])
+                hfq_last, last_date = c.get("close"), str(c.get("date") or "")[:10]
+                if latest_day and last_date != latest_day:
+                    lb = histcache.last_bar(c["code"])
+                    if lb:
+                        hfq_last, last_date = lb["close"], lb["date"]
+                c["close_real"] = spot.real_price(c.get("close"), hfq_last, last_date, q)
+        except Exception:
+            pass
         LAST_RUN.update(rows=r["candidates"], as_of=r.get("as_of", ""),
                         horizon=(r.get("model") or {}).get("dataset", {}).get("horizon"),
                         engine=r.get("engine", ""), at=dt.datetime.now().isoformat(timespec="seconds"),
@@ -783,9 +1024,17 @@ def screen_llm():
             return jsonify(llm.test(b))
         if action == "rerank":
             rows = b.get("candidates") or LAST_RUN.get("rows") or []
-            return jsonify(llm.rerank(rows, as_of=b.get("as_of") or LAST_RUN.get("as_of", ""),
-                                      horizon=b.get("horizon") or LAST_RUN.get("horizon"),
-                                      force=bool(b.get("force"))))
+            as_of = b.get("as_of") or LAST_RUN.get("as_of", "")
+            r = llm.rerank(rows, as_of=as_of,
+                           horizon=b.get("horizon") or LAST_RUN.get("horizon"),
+                           force=bool(b.get("force")))
+            try:
+                llm.save_last(r, as_of)
+            except Exception:
+                pass
+            return jsonify(r)
+        if action == "last":
+            return jsonify(llm.load_last())
         if action == "status":
             return jsonify(llm.status())
         return fail("未知操作：" + action)
@@ -800,11 +1049,8 @@ def cache():
         b = request.get_json(force=True) or {}
         if b.get("action") != "clear":
             return fail("未知操作：" + str(b.get("action")))
-        n = 0
-        for f in (BASE / "data" / "cache").glob("*"):
-            if f.suffix in (".csv", ".json"):
-                f.unlink()
-                n += 1
+        import store
+        n = store.clear_bars()
         return ok(cleared=n)
     except Exception as e:
         return fail(e)
@@ -819,5 +1065,5 @@ if __name__ == "__main__":
     print("  Press Ctrl+C or close this window to stop.")
     print("=" * 56)
     scheduler.start()          # 收盘后自动更新数据链（配置见「选股设置 → 数据准备」）
-    emtlink.start_auto()       # 收盘后自动同步一次实盘账户快照（配置见「实盘复盘 → 账户设置」）
+    emtlink.start_auto()       # 盘中低频刷新 + 收盘日结实盘账户（配置见「实盘复盘 → 账户设置」）
     app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
