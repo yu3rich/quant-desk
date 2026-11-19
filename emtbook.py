@@ -180,7 +180,10 @@ def _positions(latest: dict, days: list[dict]) -> dict:
         g["n"] += 1
 
     shares = sorted([p["mv_share"] for p in pos], reverse=True)
-    hhi = sum((s / 100) ** 2 for s in shares)
+    # HHI 用「持仓内部权重」而不是「占总资产比例」：
+    # 半仓持有 1 只时 mv_share=50%，按总资产算会得出 eff_n=4，明显失真。
+    weights = sorted([(p.get("mv") or 0) / mv_all for p in pos], reverse=True)
+    hhi = sum(w ** 2 for w in weights)
     inds = [{"name": k, "mv": _r(v["mv"]), "share": _r(v["mv"] / total * 100),
              "pnl": _r(v["pnl"]), "day_pnl": _r(v["day_pnl"]), "n": v["n"]}
             for k, v in groups.items()]
@@ -688,11 +691,10 @@ def _diagnose(latest: dict, pos: dict, trades: dict, curve: dict, has_equity: bo
 def _vs_picks(pos: dict, batches: int = 9) -> dict:
     try:
         import pandas as pd
-        from pathlib import Path
-        p = Path(__file__).resolve().parent / "data" / "screen" / "picks.csv"
-        if not p.exists():
+        import store
+        if store.picks_count() == 0:
             return {"ok": True, "empty": True, "note": "还没有选股记录"}
-        df = pd.read_csv(p, dtype={"code": str, "as_of": str})
+        df = store.picks_frame()
         if df.empty:
             return {"ok": True, "empty": True, "note": "选股记录为空"}
         df["code"] = df["code"].astype(str).str.zfill(6)

@@ -38,6 +38,12 @@ emtl 是什么
 ----
 `data/emt.json`，密码用本机派生密钥的 Fernet 加密（换机器解不开，需重填）。
 不入日志、不外传，接口只回掩码账号。
+
+频率
+----
+emtl 0.3.0 本身**没有节流**，`jywg.18.cn` 也没有公开的查询频率上限。
+本模块自己兜底：盘中默认每 5 分钟刷新一次，只复用同一登录会话；
+连续失败按 15 / 45 / 60 分钟退避，避免「高频查询」或「反复登录」变成账号风险。
 """
 from __future__ import annotations
 
@@ -52,6 +58,8 @@ import threading
 import uuid
 from pathlib import Path
 
+import journal as journal_md
+
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
 CFG_PATH = DATA / "emt.json"
@@ -62,13 +70,18 @@ FLOWS_CSV = LEDGER / "flows.csv"
 ORDERS_CSV = LEDGER / "orders.csv"
 
 _LOCK = threading.RLock()
+_CFG_LOCK = threading.Lock()
+_SYNC_LOCK = threading.Lock()          # 同一时间只允许一个快照写入，避免盘中刷新和手动同步打架
 _CLI = {"obj": None, "at": 0.0, "user": ""}
 # 东财票据有效期按登录时申请，emtl 默认 30 分钟；留 2 分钟余量
 _SESSION_KEEP = 28 * 60
 
 DEFAULT = {
     "user": "", "pass_enc": "", "enabled": False,
-    "auto_sync": False, "auto_time": "15:35",
+    "auto_sync": False, "auto_time": "15:35", "last_eod": "", "eod_try": "",
+    # 盘中自动刷新：交易时段内每 N 分钟拉一次资金/持仓，不用等收盘
+    "auto_refresh": True, "refresh_min": 5,
+    "refresh_at": "", "refresh_ok": None, "refresh_msg": "",
     "last_sync": "", "last_ok": None, "last_msg": "",
     # 历史回流：起始日、最近一次拉取时间与结果
     "hist_from": "", "hist_at": "", "hist_msg": "",
@@ -116,18 +129,24 @@ def load_cfg() -> dict:
 
 
 def save_cfg(**kw) -> dict:
-    c = load_cfg()
-    if "password" in kw:
-        pw = str(kw.pop("password") or "")
-        if pw:
-            c["pass_enc"] = _enc(pw)
-    for k, v in kw.items():
-        if k in DEFAULT:
-            c[k] = v
-    c["enabled"] = bool(c.get("user") and c.get("pass_enc"))
-    CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CFG_PATH.write_text(json.dumps(c, ensure_ascii=False, indent=1), encoding="utf-8")
-    return c
+    with _CFG_LOCK:
+        c = load_cfg()
+        if "password" in kw:
+            pw = str(kw.pop("password") or "")
+            if pw:
+                c["pass_enc"] = _enc(pw)
+        for k, v in kw.items():
+            if k in DEFAULT:
+                c[k] = v
+        # 频率给上下限：1 分钟是“手动刷新级”，再快没有意义，也容易触发网关风控
+        try:
+            c["refresh_min"] = max(1, min(60, int(c.get("refresh_min") or 5)))
+        except Exception:
+            c["refresh_min"] = 5
+        c["enabled"] = bool(c.get("user") and c.get("pass_enc"))
+        CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CFG_PATH.write_text(json.dumps(c, ensure_ascii=False, indent=1), encoding="utf-8")
+        return c
 
 
 def _mask(user: str) -> str:
@@ -597,40 +616,85 @@ def _merge_orders(old: list, new: list) -> list:
 
 
 # --------------------------------------------------------------------------
-# 账本：按交易日落盘
+# 账本：按交易日入库（SQLite，旧 JSON/CSV 首次访问自动迁移）
 # --------------------------------------------------------------------------
 
-def _day_path(day: str) -> Path:
-    return LEDGER / ("%s.json" % day)
+_LEDGER_DB_READY = False
+
+
+def _ensure_ledger_db():
+    """把旧 data/ledger/*.json 与三份 CSV 迁进库；键用本模块的去重函数算。"""
+    global _LEDGER_DB_READY
+    if _LEDGER_DB_READY:
+        return
+    import store
+    days = []
+    if LEDGER.exists():
+        for p in sorted(LEDGER.glob("*.json")):
+            if len(p.stem) != 10:
+                continue
+            try:
+                rec = json.loads(p.read_text(encoding="utf-8")) or {}
+            except Exception:
+                continue
+            if rec:
+                days.append((p.stem, rec))
+    kv = {}
+    for path, fields, keyf, table in (
+            (FILLS_CSV, _FILL_FIELDS, _fill_key, "fills"),
+            (ORDERS_CSV, _ORDER_FIELDS, _order_key, "orders"),
+            (FLOWS_CSV, _FLOW_FIELDS, _flow_key, "flows")):
+        items = []
+        if path.exists():
+            try:
+                with path.open("r", encoding="utf-8-sig", newline="") as f:
+                    for r in csv.DictReader(f):
+                        r = dict(r)
+                        k = keyf(r)
+                        if k:
+                            items.append((k, str(r.get("date") or ""),
+                                          {fl: r.get(fl, "") for fl in fields}))
+            except Exception:
+                pass
+        kv[table] = items
+    store.migrate_ledger(days, kv)
+    _LEDGER_DB_READY = True
 
 
 def _read_day(day: str) -> dict:
-    p = _day_path(day)
-    if not p.exists():
-        return {}
-    try:
-        return json.loads(p.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {}
+    _ensure_ledger_db()
+    import store
+    return store.ledger_get(day)
 
 
 def ledger_days() -> list[str]:
-    if not LEDGER.exists():
-        return []
-    return sorted((p.stem for p in LEDGER.glob("*.json") if len(p.stem) == 10), reverse=True)
+    _ensure_ledger_db()
+    import store
+    return store.ledger_days()
 
 
 def load_all(limit: int = 800) -> list[dict]:
-    out = []
-    for day in ledger_days()[:limit]:
-        d = _read_day(day)
-        if d:
-            out.append(d)
-    return out
+    _ensure_ledger_db()
+    import store
+    return store.ledger_all(limit)
 
 
-def sync(note: str = "") -> dict:
-    """同步一次并落盘。返回 {ok, day, at, overview, positions, orders, msg}"""
+def sync(note: str = "", wait: bool = True) -> dict:
+    """同步一次并落盘。返回 {ok, day, at, overview, positions, orders, msg}
+
+    wait=False 供盘中自动刷新使用：如果手动同步 / 收盘同步正在跑，就跳过这轮，
+    而不是排队再写一次重复快照。
+    """
+    got = _SYNC_LOCK.acquire(timeout=30) if wait else _SYNC_LOCK.acquire(blocking=False)
+    if not got:
+        return {"ok": False, "busy": True, "error": "已有账户同步在进行，稍后再试"}
+    try:
+        return _sync_locked(note)
+    finally:
+        _SYNC_LOCK.release()
+
+
+def _sync_locked(note: str = "") -> dict:
     at = dt.datetime.now()
     day = at.strftime("%Y-%m-%d")
     try:
@@ -643,7 +707,6 @@ def sync(note: str = "") -> dict:
         _mark(False, msg)
         return {"ok": False, "error": msg}
 
-    LEDGER.mkdir(parents=True, exist_ok=True)
     rec = _read_day(day)
     snaps = rec.get("snaps") or []
     snaps.append({"at": snap["at"], "total": snap["overview"]["total"],
@@ -658,7 +721,8 @@ def sync(note: str = "") -> dict:
     })
     if note:
         rec["note"] = str(note)[:500]
-    _day_path(day).write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
+    import store
+    store.ledger_put(day, rec)
 
     # 当日成交顺手并进 fills.csv，历史接口没拉到今天时也不缺
     added = _upsert(FILLS_CSV, _FILL_FIELDS, snap.get("fills") or [],
@@ -673,14 +737,28 @@ def sync(note: str = "") -> dict:
 
 
 def _mark(ok: bool, msg: str) -> None:
-    c = load_cfg()
-    c["last_sync"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c["last_ok"] = bool(ok)
-    c["last_msg"] = str(msg)[:300]
-    try:
-        CFG_PATH.write_text(json.dumps(c, ensure_ascii=False, indent=1), encoding="utf-8")
-    except Exception:
-        pass
+    with _CFG_LOCK:
+        c = load_cfg()
+        c["last_sync"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c["last_ok"] = bool(ok)
+        c["last_msg"] = str(msg)[:300]
+        try:
+            CFG_PATH.write_text(json.dumps(c, ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception:
+            pass
+
+
+def _mark_refresh(ok: bool, msg: str, at: str = "") -> None:
+    """盘中刷新自己的状态，跟收盘日结的 last_* 分开记，互不覆盖。"""
+    with _CFG_LOCK:
+        c = load_cfg()
+        c["refresh_at"] = at or dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c["refresh_ok"] = bool(ok)
+        c["refresh_msg"] = str(msg)[:240]
+        try:
+            CFG_PATH.write_text(json.dumps(c, ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception:
+            pass
 
 
 # --------------------------------------------------------------------------
@@ -714,42 +792,29 @@ def _flow_key(r: dict) -> str:
                                r.get("balance"), r.get("code"))
 
 
+_KV_OF = {str(FILLS_CSV): "fills", str(FLOWS_CSV): "flows", str(ORDERS_CSV): "orders"}
+
+
 def _read_csv(path: Path, fields: list[str]) -> list[dict]:
-    if not path.exists():
-        return []
-    try:
-        with path.open("r", encoding="utf-8-sig", newline="") as f:
-            return [dict(r) for r in csv.DictReader(f)]
-    except Exception:
-        return []
+    _ensure_ledger_db()
+    import store
+    return store.kv_rows(_KV_OF[str(path)])
 
 
 def _upsert(path: Path, fields: list[str], rows: list[dict], key) -> int:
-    """按 key 去重合并写入，返回新增条数。"""
+    """按 key 去重合并入库（INSERT OR IGNORE 幂等），返回新增条数。"""
     if not rows:
         return 0
-    cur = _read_csv(path, fields)
-    seen = {key(r) for r in cur}
-    added = 0
+    _ensure_ledger_db()
+    import store
+    items, seen = [], set()
     for r in rows:
         k = key(r)
         if not k or k in seen:
             continue
         seen.add(k)
-        cur.append({f: r.get(f, "") for f in fields})
-        added += 1
-    if not added:
-        return 0
-    cur.sort(key=lambda r: (str(r.get("date") or ""), str(r.get("time") or "")))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8-sig", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
-        w.writeheader()
-        for r in cur:
-            w.writerow({k: r.get(k, "") for k in fields})
-    tmp.replace(path)
-    return added
+        items.append((k, str(r.get("date") or ""), {f: r.get(f, "") for f in fields}))
+    return store.kv_upsert(_KV_OF[str(path)], items)
 
 
 def fills() -> list[dict]:
@@ -869,16 +934,17 @@ def pull_history(start: str = "", end: str = "", size: int = 500,
                 parsed = [p for p in parsed if p["date"]]
                 res["flows"] += _upsert(FLOWS_CSV, _FLOW_FIELDS, parsed, key=_flow_key)
 
-    cfg = load_cfg()
-    cfg["hist_from"] = start
-    cfg["hist_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # 零新增时保留上一次的文案，否则面板会被「+0 · +0 · +0」覆盖掉有效信息
-    if res["trades"] or res["orders"] or res["flows"]:
-        cfg["hist_msg"] = "成交 +%d · 委托 +%d · 流水 +%d" % (res["trades"], res["orders"], res["flows"])
-    try:
-        CFG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=1), encoding="utf-8")
-    except Exception:
-        pass
+    with _CFG_LOCK:
+        cfg = load_cfg()
+        cfg["hist_from"] = start
+        cfg["hist_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # 零新增时保留上一次的文案，否则面板会被「+0 · +0 · +0」覆盖掉有效信息
+        if res["trades"] or res["orders"] or res["flows"]:
+            cfg["hist_msg"] = "成交 +%d · 委托 +%d · 流水 +%d" % (res["trades"], res["orders"], res["flows"])
+        try:
+            CFG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception:
+            pass
     return res
 
 
@@ -907,14 +973,27 @@ def hist_state() -> dict:
 def status() -> dict:
     c = load_cfg()
     import time
+    now = dt.datetime.now()
     a = _CLI.get("obj")
     alive = a is not None and (time.time() - _CLI["at"]) < _SESSION_KEEP
+    due, why = _refresh_due(c, now)
     return {
         "configured": bool(c.get("user") and c.get("pass_enc")),
         "user": _mask(c.get("user") or ""),
         "enabled": bool(c.get("enabled")),
         "auto_sync": bool(c.get("auto_sync")),
         "auto_time": c.get("auto_time") or "15:35",
+        "auto_refresh": bool(c.get("auto_refresh", True)),
+        "refresh_min": int(c.get("refresh_min") or 5),
+        "refresh_at": c.get("refresh_at") or "",
+        "refresh_ok": c.get("refresh_ok"),
+        "refresh_msg": c.get("refresh_msg") or "",
+        # 状态按「当前时间 + 配置」现算，比上一轮循环留下的 note 更准：
+        # 关掉开关立刻显示已关闭，刚刷新完则显示下次大约几分钟后。
+        "refresh_state": ("正在刷新…" if _REFRESH.get("running")
+                          else (why or "等待刷新")),
+        "refresh_due": bool(due),
+        "in_session": _in_session(now),
         "logged_in": alive,
         "last_sync": c.get("last_sync") or "",
         "last_ok": c.get("last_ok"),
@@ -937,34 +1016,157 @@ def _lib_ver() -> str:
 # 复盘日记（按交易日）
 # --------------------------------------------------------------------------
 
-def journal_set(day: str, text: str) -> dict:
+JOURNAL_SRC = ("manual", "ai", "local")
+
+
+def journal_set(day: str, text: str, src: str = "manual", model: str = "") -> dict:
+    """写入当日日记。落盘为 data/journal/YYYY-MM-DD.md（唯一权威），
+    账本里若已有这一天再镜像一份，供看板与体检沿用旧字段。"""
+    r = journal_md.save(day, text, src=src, model=model)
+    if not r.get("ok"):
+        return r
+    day = r["day"]
+    journal_mirror(day)
+    return {"ok": True, "day": day, "journal": r.get("text") or "",
+            "journal_src": r.get("src") or "manual", "journal_at": r.get("updated_at") or ""}
+
+
+def journal_mirror(day: str) -> None:
+    """把 .md 内容镜像进已有账本日，供看板等旧读取路径使用。
+
+    没有账本快照的日子只留 .md —— 写日记不应该凭空造出一个账本日。
+    """
     day = str(day or "")[:10]
-    if len(day) != 10:
-        return {"ok": False, "error": "日期格式应为 YYYY-MM-DD"}
-    LEDGER.mkdir(parents=True, exist_ok=True)
-    rec = _read_day(day) or {"date": day, "overview": {}, "positions": [], "orders": []}
-    rec["journal"] = str(text or "")[:2000]
-    rec["journal_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-    _day_path(day).write_text(json.dumps(rec, ensure_ascii=False, indent=1), encoding="utf-8")
-    return {"ok": True, "day": day, "journal": rec["journal"]}
+    r = journal_md.read(day)
+    if not (r.get("ok") and r.get("exists")):
+        return
+    rec = _read_day(day)
+    if not rec:
+        return
+    import store
+    rec["journal"] = str(r.get("text") or "")[:20000]
+    rec["journal_at"] = r.get("updated_at") or ""
+    rec["journal_src"] = r.get("src") or "manual"
+    rec["journal_model"] = r.get("model") or ""
+    store.ledger_put(day, rec)
+
+
+def journal_clear(day: str) -> None:
+    """删除日记时同步清掉账本里的镜像字段，避免旧内容被看板或迁移重新带回来。"""
+    day = str(day or "")[:10]
+    rec = _read_day(day)
+    if not rec:
+        return
+    for k in ("journal", "journal_at", "journal_src", "journal_model"):
+        rec.pop(k, None)
+    import store
+    store.ledger_put(day, rec)
 
 
 def journal_get(day: str) -> str:
+    r = journal_md.read(day)
+    if r.get("ok") and r.get("exists"):
+        return str(r.get("text") or "")
+    # 升级前的旧日记还只存在账本字段里，读时回退，第一次保存后就成了 .md
     return str((_read_day(str(day or "")[:10]) or {}).get("journal") or "")
 
 
+def day_merge(day: str, fields: dict) -> dict:
+    """把若干字段并进某日账本，保留其余内容。用于体检结果等附属数据。"""
+    day = str(day or "")[:10]
+    if len(day) != 10:
+        return {"ok": False, "error": "日期格式应为 YYYY-MM-DD"}
+    rec = _read_day(day) or {"date": day, "overview": {}, "positions": [], "orders": []}
+    rec.update(fields or {})
+    import store
+    store.ledger_put(day, rec)
+    return {"ok": True, "day": day}
+
+
+def journal_meta(day: str) -> dict:
+    """当日日记与 AI 体检的元信息，供 emtai 判断是否需要生成。
+
+    日记以 .md 为准；没有 .md 时才回退到升级前的账本字段。
+    """
+    day = str(day or "")[:10]
+    rec = _read_day(day) or {}
+    r = journal_md.read(day)
+    if r.get("ok") and r.get("exists"):
+        text = str(r.get("text") or "")
+        return {"day": day, "journal": text,
+                "journal_at": str(r.get("updated_at") or ""),
+                "journal_src": str(r.get("src") or ("manual" if text else "")),
+                "journal_model": str(r.get("model") or ""),
+                "health_ai": rec.get("health_ai") or None}
+    text = str(rec.get("journal") or "")
+    return {"day": day, "journal": text,
+            "journal_at": str(rec.get("journal_at") or ""),
+            "journal_src": str(rec.get("journal_src") or ("manual" if text else "")),
+            "journal_model": str(rec.get("journal_model") or ""),
+            "health_ai": rec.get("health_ai") or None}
+
+
 # --------------------------------------------------------------------------
-# 自动同步（收盘后一次，进程内 daemon）
+# 自动刷新与收盘日结（进程内 daemon）
 # --------------------------------------------------------------------------
+#
+# 两个定时器，职责分开：
+#   盘中刷新：交易时段每 N 分钟一次，让「实盘复盘」看到的是当前资金/持仓，不用等收盘。
+#   收盘日结：15:35 再同步一次并补当天成交，给账本留下正式的日快照。
 #
 # 为什么单独一个定时器，不并进 scheduler.py 的数据链：
 #   数据链 (18:10) 是「等 baostock 入库」，账户快照 (15:35) 是「等收盘价定盘」，
 #   时间点、失败代价、前置条件都不一样。混在一个配置里，改一边必然影响另一边。
 #
-# 每天最多一次、失败不重试：东财账号连续登录失败会被锁，宁可少一天的快照，
-# 也不能把账号玩坏。错过的成交以后用「拉取历史」补回来（这正是 emtl 的价值）。
+# 风控取舍：emtl 不内置限流，东财网关也没有公开的频率文档。这里默认 5 分钟、
+# 复用同一个登录会话，连续失败按 15/45/60 分钟退避；宁可少几次刷新，也不让
+# 「高频查询」或「反复登录」把账号玩坏。错过的成交以后用「拉取历史」补。
 
 _AUTO = {"started": False, "last_try": "", "note": ""}
+_REFRESH = {"started": False, "next_try": 0.0, "fails": 0, "note": "", "running": False}
+
+
+def _in_session(now: dt.datetime | None = None) -> bool:
+    """A 股连续竞价时段：09:25~11:30、13:00~15:02。09:25 含集合竞价快照。"""
+    now = now or dt.datetime.now()
+    if now.isoweekday() > 5:
+        return False
+    m = now.hour * 60 + now.minute
+    return (9 * 60 + 25 <= m <= 11 * 60 + 30) or (13 * 60 <= m <= 15 * 60 + 2)
+
+
+def _refresh_due(cfg: dict, now: dt.datetime) -> tuple[bool, str]:
+    if not cfg.get("auto_refresh", True):
+        return False, "盘中自动刷新未开启"
+    if not (cfg.get("user") and cfg.get("pass_enc")):
+        return False, "未配置账号"
+    if now.isoweekday() > 5:
+        return False, "周末不刷新"
+    if not _in_session(now):
+        return False, "非交易时段，暂不刷新"
+    import time
+    wait = float(_REFRESH.get("next_try") or 0) - time.time()
+    if wait > 0:
+        return False, "失败退避中，约 %d 分钟后重试" % (int(wait / 60) + 1)
+    try:
+        mins = max(1, min(60, int(cfg.get("refresh_min") or 5)))
+    except Exception:
+        mins = 5
+    # 自动刷新与手动同步都算“刚取过数”：取两者中较晚的时间，避免手动同步后
+    # 紧跟着又自动打一遍网关。
+    stamps = []
+    for s in (cfg.get("refresh_at"), cfg.get("last_sync")):
+        try:
+            stamps.append(dt.datetime.strptime(str(s or "")[:19], "%Y-%m-%d %H:%M:%S"))
+        except Exception:
+            pass
+    t = max(stamps) if stamps else None
+    if t is not None:
+        left = mins * 60 - (now - t).total_seconds()
+        if left > 0:
+            return False, "约 %d 分钟后刷新" % (int(left / 60) + 1)
+    return True, ""
+
 
 
 def _auto_due(cfg: dict, now: dt.datetime) -> tuple[bool, str]:
@@ -984,10 +1186,50 @@ def _auto_due(cfg: dict, now: dt.datetime) -> tuple[bool, str]:
         return False, "未到 %s" % hm
     if (now - t).total_seconds() > 4 * 3600:
         return False, "已过 4 小时补跑窗口"
-    last = str(cfg.get("last_sync") or "")
-    if last[:10] == now.strftime("%Y-%m-%d"):
-        return False, "今天已同步过（含失败，不重试）"
+    # 用 eod_try 而不是 last_sync：盘中刷新会不断更新 last_sync，拿它判断会漏掉
+    # 收盘日结；同时 eod_try 在发起前就写入，失败当天也不再重试，避免反复登录锁号。
+    if str(cfg.get("eod_try") or "")[:10] == now.strftime("%Y-%m-%d"):
+        return False, "今天已日结过（含失败，不重试）"
     return True, ""
+
+
+def _refresh_loop():
+    """交易时段内低频刷新账户快照。失败不立即重试，避免触发登录风控。"""
+    import time
+    time.sleep(20)                       # 等服务启动完成，也让手动操作先走
+    while True:
+        try:
+            now = dt.datetime.now()
+            cfg = load_cfg()
+            due, why = _refresh_due(cfg, now)
+            if due:
+                _REFRESH["running"] = True
+                try:
+                    r = sync(note="盘中自动刷新", wait=False)
+                except Exception as err:                 # noqa: BLE001
+                    r = {"ok": False, "error": str(err)[:120]}
+                finally:
+                    _REFRESH["running"] = False
+                if r.get("busy"):
+                    _REFRESH["note"] = "有同步任务在进行，本轮跳过"
+                elif r.get("ok"):
+                    _REFRESH.update(fails=0, next_try=0.0)
+                    msg = "盘中已刷新 · %s" % (r.get("at") or "")
+                    _REFRESH["note"] = msg
+                    _mark_refresh(True, msg, r.get("at") or "")
+                else:
+                    fails = int(_REFRESH.get("fails") or 0) + 1
+                    base = max(5, int(cfg.get("refresh_min") or 5))
+                    delay = min(60, base * (3 ** min(fails, 3)))
+                    _REFRESH.update(fails=fails, next_try=time.time() + delay * 60)
+                    msg = "刷新失败：%s，%d 分钟后再试" % (str(r.get("error") or "未知原因")[:120], delay)
+                    _REFRESH["note"] = msg
+                    _mark_refresh(False, msg)
+            elif why:
+                _REFRESH["note"] = why
+        except Exception:
+            pass
+        time.sleep(20)
 
 
 def _auto_loop():
@@ -1002,6 +1244,7 @@ def _auto_loop():
                 due, why = _auto_due(cfg, now)
                 if due:
                     _AUTO.update(last_try=stamp, note="自动同步中…")
+                    save_cfg(eod_try=now.strftime("%Y-%m-%d"))   # 发起即记，失败也不当天重试
                     threading.Thread(target=_auto_run, name="emt-auto", daemon=True).start()
                 else:
                     _AUTO["note"] = why
@@ -1011,17 +1254,33 @@ def _auto_loop():
 
 
 def _auto_run():
+    # 收盘日结比盘中刷新重要：宁可等手动同步几十秒，也不因为锁被占用漏掉当天快照
     r = sync(note="自动同步")
+    if r.get("busy"):
+        # 锁被手动同步占着：这不算失败，清掉今天的“已尝试”标记，下一轮再补
+        save_cfg(eod_try="")
+        _AUTO["note"] = "收盘同步遇到进行中的任务，稍后重试"
+        return
     if not r.get("ok"):
         _AUTO["note"] = "自动同步失败：" + str(r.get("error") or "")[:120]
         return
+    # 日结标记与盘中刷新分开记；只有这里成功才算「今天已日结」
+    save_cfg(last_eod=r.get("day") or dt.date.today().isoformat())
     # 快照成功后顺带补当天成交（历史接口按天查最省事，也不会重复）
     try:
         pull_history(r.get("day") or "", r.get("day") or "", size=200,
                      what=("trades", "orders"))
     except Exception:
         pass
-    _AUTO["note"] = "自动同步成功 · %s" % (r.get("at") or "")
+    # 日结完成后按用户开关生成复盘（AI 或本地模板）；失败不影响账本
+    try:
+        import emtai
+        ar = emtai.auto_after_eod(r.get("day") or "")
+        _AUTO["note"] = "自动同步成功 · %s · 复盘%s" % (
+            r.get("at") or "",
+            "已更新" if ar.get("ok") and ar.get("result") else "未生成（按设置跳过）")
+    except Exception:
+        _AUTO["note"] = "自动同步成功 · %s" % (r.get("at") or "")
 
 
 def start_auto() -> bool:
@@ -1029,6 +1288,9 @@ def start_auto() -> bool:
         return False
     _AUTO["started"] = True
     threading.Thread(target=_auto_loop, name="emt-auto-tick", daemon=True).start()
+    if not _REFRESH["started"]:
+        _REFRESH["started"] = True
+        threading.Thread(target=_refresh_loop, name="emt-refresh-tick", daemon=True).start()
     return True
 
 
