@@ -149,6 +149,14 @@ def _due(cfg: dict, now: dt.datetime) -> tuple[bool, str]:
             at = None
         if at and (now - at).total_seconds() < 1800:
             return False, "上次失败，半小时后重试"
+    # 周一至周五也可能休市（国庆/春节等）：确认今天真开市再拉数据，
+    # 否则节假日会空跑一轮全市场增量，白白消耗数据源配额。
+    try:
+        import pipeline
+        if pipeline._is_trading_day(now.strftime("%Y%m%d")) is False:
+            return False, "今天休市"
+    except Exception:
+        pass
     return True, ""
 
 
@@ -173,7 +181,8 @@ def _go(cfg: dict, trigger: str):
     _record(date=day, at=dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             trigger=trigger, ok=None, brief="运行中", ms=0, tries=tries)
     try:
-        r = pipeline.run_async(cfg.get("level") or "auto", bool(cfg.get("quote")))
+        r = pipeline.run_async(cfg.get("level") or "auto", bool(cfg.get("quote")),
+                               trigger="scheduled")
         if not r.get("ok"):
             _record(ok=False, brief=str(r.get("error") or "启动失败")[:120],
                     ms=int((time.time() - t0) * 1000))

@@ -9,7 +9,7 @@ QuantDesk 选股框架 · 数据层（Stage 1）
 
 设计边界（本期只做框架）：
   - 漏斗过滤、行业约束、T+N 后验闭环：仅预留接口与状态位，本轮不实现
-  - 全部基于 data/cache/*.csv 的本地前复权日线，不新增高频联网请求
+  - 全部基于 store.bars（SQLite）的本地后复权日线，不新增高频联网请求
   - 训练标签使用未来数据，但严格限制在 dataset 内；snapshot 永远只用到截止日
 """
 from __future__ import annotations
@@ -27,7 +27,6 @@ import histcache
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
-CACHE_DIR = DATA / "cache"
 SCREEN_DIR = DATA / "screen"
 SCREEN_DIR.mkdir(parents=True, exist_ok=True)
 UNIVERSE_PATH = DATA / "universe.csv"
@@ -157,7 +156,9 @@ def funnel(df: pd.DataFrame, cfg: dict | None = None) -> tuple[pd.DataFrame, lis
                        "enabled": bool(enabled)})
 
     cur = df.copy()
-    rec("pool", "样本池", len(cur), len(cur), "本地行情缓存里能算出完整因子的股票", True)
+    rec("pool", "样本池", len(cur), len(cur),
+        "本次参与打分的股票：本地缓存中因子完整、且落在同一交易日；默认全市场，"
+        "若设了「样本上限」则按上限等间隔抽样", True)
 
     # 1) 数据完整
     before = len(cur)
@@ -292,38 +293,27 @@ def select(scored: pd.DataFrame, topn: int = 10, cap: int | None = None) -> dict
 def record_picks(picked: list[dict], as_of: str) -> dict:
     """把当期候选落盘，供 T+N 后验闭环回看。
 
-    一个交易日只保留一期候选：同 as_of 再选一次（改 TopN 或调参数）就整期覆盖旧记录。
-    否则同一期会堆积多批互不相干的候选，后验统计等于把几次不同实验混在一起平均。
+    每次选股＝一个批次（as_of + recorded_at）。同一数据日再选一次（改 TopN 或
+    调参数）会新增一个批次，旧批次保留；T+N 后验也按批次聚合，实测口径可对照。
     """
     if not picked:
         return {"ok": True, "added": 0, "total": 0}
-    path = DATA / "screen" / "picks.csv"
-    fields = ["as_of", "code", "name", "industry", "rank", "score", "close", "recorded_at"]
-    as_of = str(as_of)
-    existing = []
-    if path.exists():
-        try:
-            old = pd.read_csv(path, dtype={"code": str, "as_of": str})
-            existing = old.to_dict("records")
-        except Exception:
-            existing = []
-    keep = [r for r in existing if str(r.get("as_of")) != as_of]
-    replaced = len(existing) - len(keep)
-    added = 0
+    import store
+    as_of = str(as_of or "").strip()[:10]
+    if len(as_of) != 10 or as_of[4] != "-" or as_of[7] != "-":
+        return {"ok": False, "error": "选股记录的数据日无效：%s" % (as_of or "—"),
+                "added": 0, "total": 0}
     now = _now_iso()
-    for x in picked:
-        code = str(x.get("code")).zfill(6)
-        keep.append({"as_of": as_of, "code": code, "name": x.get("name", ""),
-                     "industry": x.get("industry", ""), "rank": x.get("rank", ""),
-                     "score": x.get("score", ""), "close": x.get("close", ""),
-                     "recorded_at": now})
-        added += 1
+    rows = [{"code": str(x.get("code")).zfill(6), "name": x.get("name", ""),
+             "industry": x.get("industry", ""), "rank": x.get("rank", ""),
+             "score": x.get("score", ""), "close": x.get("close", ""),
+             "recorded_at": now} for x in picked]
     try:
-        pd.DataFrame(keep, columns=fields).to_csv(path, index=False, encoding="utf-8-sig")
+        added, replaced, total = store.picks_replace(as_of, rows)
     except Exception as e:
-        return {"ok": False, "error": str(e), "added": 0, "total": len(keep)}
+        return {"ok": False, "error": str(e), "added": 0, "total": 0}
     return {"ok": True, "added": added, "replaced": replaced,
-            "total": len(keep), "file": str(path)}
+            "total": total, "file": str(store.DB_PATH)}
 
 
 
@@ -377,12 +367,9 @@ def _today_unclosed() -> str:
 
 def load_history(code: str, as_of: str | None = None) -> pd.DataFrame | None:
     """纯本地读取缓存日线；不联网、不触发刷新。"""
-    fp = CACHE_DIR / (str(code).zfill(6) + ".csv")
-    if not fp.exists():
-        return None
-    try:
-        d = pd.read_csv(fp, dtype={"date": str})
-    except Exception:
+    import store
+    d = store.bars_frame(code)
+    if d is None:
         return None
     d["date"] = d["date"].astype(str).str.slice(0, 10)
     for c in ("open", "high", "low", "close", "volume", "amount", "pct", "turnover"):
@@ -608,6 +595,31 @@ def base_scores(df: pd.DataFrame, mode: str | None = None) -> pd.Series:
     return _cs_z(s).fillna(0.0)
 
 
+def attach_market_cap(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    """给当期横截面补总市值（亿元），供「行业+市值」中性化使用。
+
+    只用于**当前**截面的可选中性化；训练集不这么做：本地只有最近一期的估值快照，
+    拿它回填 2022 年的历史样本属于前视，宁可让训练退化为行业中性。
+    返回（补好列的 df, 估值数据日）。
+    """
+    try:
+        import datasource
+        basic = datasource.load_basic() or {}
+    except Exception:
+        basic = {}
+    if not basic:
+        return df, ""
+    vals, dates = [], []
+    for c in df.get("code", []):
+        e = basic.get(str(c).zfill(6)) or {}
+        vals.append(e.get("total_mv") if e.get("total_mv") not in ("", None) else None)
+        if e.get("trade_date"):
+            dates.append(str(e.get("trade_date")))
+    df = df.copy()
+    df["total_mv"] = pd.to_numeric(pd.Series(vals, index=df.index), errors="coerce")
+    return df, (max(dates) if dates else "")
+
+
 def add_industry_features(df: pd.DataFrame) -> pd.DataFrame:
     """补行业类因子与行业内百分位。行业缺失时全部按中性值（0 / 空）处理，不编造。
 
@@ -648,10 +660,15 @@ def _sample_even(codes: list[str], limit: int) -> list[str]:
     return [codes[min(n - 1, int(i * step))] for i in range(limit)]
 
 
-def resolve_scope(scope: str, limit: int = 1500) -> list[str]:
-    """scope: cached（有本地行情缓存） / pool（股票池） / all（全 A 名单，仍只取有缓存的）"""
+def resolve_scope(scope: str, limit: int = 0) -> list[str]:
+    """scope: cached（有本地行情缓存） / pool（股票池） / all（全 A 名单，仍只取有缓存的）
+
+    limit=0 表示不抽样、用全市场；正数才等间隔抽样。默认全市场，避免用户
+    以为「样本池」等于全部 A 股，实际却只算了 1500 只。
+    """
     uni = _universe_names()
-    cached = sorted(p.stem for p in CACHE_DIR.glob("*.csv"))
+    import store
+    cached = store.cached_codes()
     if scope == "pool":
         try:
             import watchlist
@@ -662,8 +679,22 @@ def resolve_scope(scope: str, limit: int = 1500) -> list[str]:
     elif scope == "all":
         codes = [c for c in (uni.keys() or cached) if c in set(cached)]
     else:
-        codes = cached
+        # 名单按交易所前缀只收个股；缓存里还留有已退市/改码的旧代码（如 000022
+        # 已改 001872），选股只取当前名单内的个股。uni 为空时回退全部缓存。
+        stocks = set(uni.keys())
+        codes = [c for c in cached if (not stocks or c in stocks)]
     return _sample_even(sorted(codes), int(limit) if limit else 0)
+
+
+def norm_limit(v) -> int:
+    """样本上限归一：0 / 空 / 非法值都按「全市场」处理，正数限制在 200~20000。"""
+    try:
+        n = int(v or 0)
+    except Exception:
+        return 0
+    if n <= 0:
+        return 0
+    return max(200, min(n, 20000))
 
 
 # --------------------------------------------------------------------------
@@ -696,7 +727,8 @@ def _snap_item(code: str, last: dict, uni: dict) -> dict | None:
 
 
 def build_snapshot(scope: str = "cached", as_of: str | None = None,
-                   limit: int = 1500) -> dict:
+                   limit: int = 0) -> dict:
+    """limit=0 表示全市场（默认）；正数则等间隔抽样，兼顾速度与代码空间覆盖。"""
     # 与行情更新并发时直接拒绝：否则会把更新前的旧 K 线固化成一张过期快照，
     # 表面上「选股成功」，实际数据日停在几天前。
     if cache_updating():
@@ -709,13 +741,14 @@ def build_snapshot(scope: str = "cached", as_of: str | None = None,
         return {"ok": False, "updating": True,
                 "error": "行情正在增量更新（%s/%s），完成后再选股，否则会读到写了一半的行情"
                          % (st.get("done", "?"), st.get("total", "?"))}
+    limit = norm_limit(limit)
     codes = resolve_scope(scope, limit)
     if not codes:
         return {"ok": False, "error": "没有可用的本地行情缓存，请先在「股票池 → 全 A 股名单」里预热行情"}
     uni = _universe_names()
     rows = []
-    # 分批并行读取：一次把 1500 只的 DataFrame 全展开会吃掉 400 MB 以上内存，
-    # 每批 200 只读完即算即弃，峰值只有几十 MB。
+    # 分批读取：一次把全市场五千多只的 DataFrame 全展开会吃掉 1 GB 以上内存，
+    # 每批 300 只读完即算即弃，峰值只有几十 MB。
     for i in range(0, len(codes), 300):
         batch = codes[i:i + 300]
         if as_of:
@@ -728,7 +761,7 @@ def build_snapshot(scope: str = "cached", as_of: str | None = None,
                         rows.append(item)
         else:
             # 当期快照：完全不构造 DataFrame，直接读 CSV 尾部数组算因子。
-            # 1500 只从 16 秒降到 2 秒内，这是首屏「点一下要等很久」的主因。
+            # 1500 只约 2 秒，全市场五千多只约 7 秒，是首屏「点一下要等很久」的主因。
             for code in batch:
                 last = last_features_raw(code)
                 if last:
@@ -752,6 +785,7 @@ def build_snapshot(scope: str = "cached", as_of: str | None = None,
         snap = industry.enrich(snap)      # 补「代码 → 行业」，查不到留空（不编造）
     except Exception:
         pass
+    snap, mv_day = attach_market_cap(snap)   # 行业+市值中性化需要总市值
     snap = add_industry_features(snap)    # 行业动能 / 行业内相对动量 / 行业内百分位
     snap["base_score"] = base_scores(snap, NEUTRAL_DEFAULT).round(4)
     snap = snap.sort_values("base_score", ascending=False).reset_index(drop=True)
@@ -792,6 +826,9 @@ def build_snapshot(scope: str = "cached", as_of: str | None = None,
             "industries": len([k for k in dist if k != "未分类"]),
             "industry_dist": dist,
             "industry_cover": round((len(rows) - dist.get("未分类", 0)) / max(1, len(rows)) * 100, 1),
+            "market_cap_cover": (round(float(snap["total_mv"].notna().mean()) * 100, 1)
+                                 if "total_mv" in snap.columns else 0.0),
+            "market_cap_day": mv_day,
             "is_historical": bool(as_of),
             "persisted": persist,
             "warning": "；".join(warns)}
@@ -864,6 +901,9 @@ def build_dataset(start: str = "20220101", end: str | None = None,
     step = max(1, min(int(step), 30))
     neutral_mode = neutral_mode if neutral_mode in NEUTRAL_MODES else NEUTRAL_DEFAULT
     label_mode = label_mode if label_mode in LABEL_MODES else "market"
+    neutral_requested = neutral_mode
+    neutral_note = ""
+    size_cover = None
     codes = resolve_scope(scope, max_symbols)
     if not codes:
         return {"ok": False, "error": "没有可用的本地行情缓存，无法构造训练集"}
@@ -913,6 +953,39 @@ def build_dataset(start: str = "20220101", end: str | None = None,
         m = {}
     ds["industry"] = [m.get(str(c).zfill(6), "") for c in ds["code"]]
 
+    # 市值中性化需要「当时」的总市值，不能拿今天的估值回填历史（前视）。
+    # 数据源每次拉 daily_basic 都会累积到 data/extra/mv_history.csv；这里按
+    # 「同一代码 ≤ 样本日、最多向前 8 个自然日」取最近一次快照。
+    if neutral_requested == "industry+size":
+        try:
+            import datasource
+            hist = datasource.load_mv_history()
+        except Exception:
+            hist = {}
+        if hist:
+            try:
+                hrows = [{"_dt": pd.Timestamp(day), "code": code, "total_mv": mv}
+                         for day, mp in hist.items() for code, mv in mp.items()]
+                hdf = pd.DataFrame(hrows).sort_values(["_dt", "code"]).reset_index(drop=True)
+                ds["_dt"] = pd.to_datetime(ds["date"], errors="coerce")
+                ds = pd.merge_asof(ds.sort_values(["_dt", "code"]).reset_index(drop=True),
+                                   hdf, on="_dt", by="code", direction="backward",
+                                   tolerance=pd.Timedelta(days=8))
+                ds = ds.drop(columns=["_dt"])
+                size_cover = round(float(pd.to_numeric(ds["total_mv"], errors="coerce")
+                                         .notna().mean()) * 100, 1)
+            except Exception:
+                size_cover = None
+                ds.drop(columns=[c for c in ("_dt", "total_mv") if c in ds.columns],
+                        inplace=True)
+        if size_cover is None or size_cover < 60:
+            neutral_mode = "industry"
+            neutral_note = ("历史总市值覆盖不足（%s），训练退化为行业中性；"
+                            "在「数据中枢 → 数据源」拉取估值会逐日累积，覆盖够了会自动启用市值中性"
+                            % ("无历史市值" if size_cover is None else "%.1f%%" % size_cover))
+        else:
+            neutral_note = "历史总市值覆盖 %.1f%%（按样本日前 8 天内的最近估值匹配），已启用行业 + 市值中性" % size_cover
+
     # 行业类因子：按「同日 + 同行业」算组均值，保证与推理快照同口径
     ind = neutral._ind_series(ds)
     mom = pd.to_numeric(ds["mom20"], errors="coerce")
@@ -961,6 +1034,7 @@ def build_dataset(start: str = "20220101", end: str | None = None,
     cross = ds.groupby("_daykey").size()
     meta = {"ok": True, "generated": _now_iso(), "start": start, "end": end,
             "horizon": horizon, "step": step, "scope": scope,
+            "max_symbols": int(max_symbols or 0),
             "symbols": len(records), "rows": int(len(ds)),
             "cross_sections": int(len(cross)),
             "date_min": str(ds["date"].min()), "date_max": str(ds["date"].max()),
@@ -970,11 +1044,15 @@ def build_dataset(start: str = "20220101", end: str | None = None,
                             else "T 日收盘建仓（旧口径，含隔夜跳空，收益偏高估）"),
             "entry_lag": entry_lag,
             "target_col": "y_target",
-            "neutral": neutral_mode, "feature_version": FEATURE_VERSION,
+            "neutral": neutral_mode, "neutral_requested": neutral_requested,
+            "neutral_note": neutral_note,
+            "size_cover": size_cover,
+            "feature_version": FEATURE_VERSION,
             "features": FEATURE_KEYS,
             "industry_cover": round(float(neutral._ind_series(ds).ne("").mean()) * 100, 1),
             "file": str(DATASET_CSV),
-            "note": "标签使用未来数据仅用于训练；推理快照不含任何未来信息。行业归属用当前映射回填，属近似。"}
+            "note": "标签使用未来数据仅用于训练；推理快照不含任何未来信息。行业归属用当前映射回填，属近似。"
+                    + (neutral_note + "。" if neutral_note else "")}
     _json_write(DATASET_META, meta)
     return meta
 
@@ -990,23 +1068,18 @@ def load_dataset() -> tuple[pd.DataFrame | None, dict]:
 
 
 def status() -> dict:
+    import store
     snap_df, snap_meta = load_snapshot()
     ds_df, ds_meta = load_dataset()
     uni = _universe_names()
     ind = {}
     try:
         import industry
-        cached_codes = [p.stem for p in CACHE_DIR.glob("*.csv")]
+        cached_codes = store.cached_codes()
         ind = industry.status(cached_codes)
     except Exception as e:
         ind = {"ok": False, "error": str(e)[:120]}
-    picks_path = SCREEN_DIR / "picks.csv"
-    picks_rows = 0
-    if picks_path.exists():
-        try:
-            picks_rows = int(len(pd.read_csv(picks_path, dtype={"code": str})))
-        except Exception:
-            picks_rows = 0
+    picks_rows = store.picks_count()
     neutral_info = {"default": NEUTRAL_DEFAULT, "modes": list(NEUTRAL_MODES),
                     "describe": {}, "size": {}, "min_group": 5}
     try:
@@ -1019,7 +1092,7 @@ def status() -> dict:
     return {
         "ok": True,
         "universe_total": len(uni),
-        "cached_total": len(list(CACHE_DIR.glob("*.csv"))),
+        "cached_total": store.cached_count(),
         "feature_count": len(FEATURES),
         "feature_version": FEATURE_VERSION,
         "core_feature_count": len(CORE_KEYS),
@@ -1033,7 +1106,7 @@ def status() -> dict:
         "modules": MODULES,
         "industry": ind,
         "funnel": {"defaults": FUNNEL_DEFAULT, "industry_cap": INDUSTRY_CAP_DEFAULT},
-        "picks": {"rows": picks_rows, "file": str(picks_path)},
+        "picks": {"rows": picks_rows, "file": str(store.DB_PATH)},
         "data_dir": str(SCREEN_DIR),
         "note": "三层链路 + 漏斗 / 行业中性化 / 行业约束 / T+N 后验已全部落地；指标仍受本地行情覆盖度限制。",
     }

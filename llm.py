@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-QuantDesk 选股框架 · LLM 层（Stage 3）
+QuantDesk · LLM 层
 
-只做「候选重排 + 用因子说话的解读」，不做买卖决策、不联网抓数据、不读账户。
-- 默认关闭：未配置 / 未启用时用本地规则模板生成解读，明确标注 local，绝不伪装成 LLM
+提供两处能力，共用同一套端点配置与密钥（data/llm.json）：
+1. 选股重排：只做「候选重排 + 用因子说话的解读」，不做买卖决策、不读账户。
+2. 复盘 AI：由 emtai 调用，生成复盘日记 / 行为体检；发送账本聚合数据，见 PRIVACY_REVIEW。
+
+边界：
+- 默认关闭：未配置 / 未启用时用本地规则模板，明确标注 local，绝不伪装成 LLM
 - 启用后走用户自己填写的 OpenAI 兼容 /chat/completions 端点
-- 出网内容仅限候选的代码、名称、模型分与因子数值；不含账户、持仓、成交、自选股来源
-- 返回结果做白名单校验：模型编造的代码一律丢弃，理由截断，分数钳制
+- 选股重排只发送候选代码、名称、模型分与因子数值，不含账户、持仓、成交
+- 复盘 AI 仅在用户把对应开关切到 AI 时发送账本聚合数据，不含账号、密码、流水号
+- 选股返回结果做白名单校验：模型编造的代码一律丢弃，理由截断，分数钳制
 """
 from __future__ import annotations
 
@@ -28,6 +33,11 @@ DEFAULT = {"enabled": False, "base_url": "", "api_key": "", "model": "",
 
 PRIVACY = ("仅在「已启用且点重排」时才向下方填写的端点发送候选代码/名称/模型分/因子数值；"
            "不发送账户、持仓、成交记录或自选股来源。密钥只保存在本机 data/llm.json。")
+
+PRIVACY_REVIEW = ("把「复盘日记 / 行为体检」切到 AI 并生成时，会向同一端点发送账本聚合数据："
+                  "总资产、当日与累计盈亏、仓位占比、成交统计、持仓与已平仓股票的名称/代码。"
+                  "不发送资金账号、密码、委托编号、成交编号、自选股来源与完整的资金流水明细；"
+                  "密钥只保存在本机 data/llm.json。若不想出网，保持「本地规则」模式即可。")
 
 
 def _cfg() -> dict:
@@ -150,6 +160,30 @@ def test(body: dict | None = None) -> dict:
                 "finish_reason": r.get("finish_reason", "")}
     except Exception as e:
         return {"ok": False, "error": "连接失败：" + str(e)[:200]}
+
+
+def ready(c: dict | None = None) -> bool:
+    """复盘 AI 能否调用：既要配置完整，也要用户打开了 LLM 总开关。"""
+    c = c or _cfg()
+    return bool(c.get("enabled") and configured(c))
+
+
+def chat(messages: list[dict], max_tokens: int = 3000,
+         c: dict | None = None) -> dict:
+    """通用对话入口，供 emtai 使用。失败不抛异常，统一返回 ok=False。
+
+    与 rerank 的区别：这里不做候选白名单，由调用方负责解析与校验。
+    """
+    c = c or _cfg()
+    if not configured(c):
+        return {"ok": False, "error": "LLM 未配置：需要 base_url、api_key、model"}
+    if not c.get("enabled"):
+        return {"ok": False, "error": "LLM 总开关未启用（选股设置 → LLM 重排 → 启用）"}
+    try:
+        r = _chat(messages, c, max_tokens=int(max_tokens or 3000))
+        return dict(r, ok=True)
+    except Exception as e:                                   # noqa: BLE001
+        return {"ok": False, "error": "LLM 调用失败：" + str(e)[:240]}
 
 
 # --------------------------------------------------------------------------
@@ -386,3 +420,35 @@ def rerank(candidates: list[dict], as_of: str = "", horizon: int | None = None,
                 "parse": why or "ok", "diag": diag, "warning": warn}
     except Exception as e:
         return _local(candidates, "LLM 调用失败（%s），已回退本地规则解读。" % str(e)[:160])
+
+
+# ---- 重排结果持久化：刷新页面 / 重启服务后仍可恢复，不必重烧 token ----
+LAST_PATH = BASE / "data" / "screen" / "llm_last.json"
+
+
+def save_last(result: dict, as_of: str = "") -> None:
+    """只存恢复所需的最小集合（分数/理由/名次），价格等行情字段恢复时用最新候选。"""
+    if not result.get("ok") or not result.get("rows"):
+        return
+    items = [{"code": str(x.get("code") or ""), "llm_score": x.get("llm_score"),
+              "reason": x.get("reason"), "rank_llm": x.get("rank_llm")}
+             for x in result["rows"]]
+    data = {"as_of": str(as_of or ""), "mode": result.get("mode", "local"),
+            "model": result.get("model", ""),
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"), "items": items}
+    LAST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = LAST_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(LAST_PATH)
+
+
+def load_last() -> dict:
+    if not LAST_PATH.exists():
+        return {"ok": True, "saved": None}
+    try:
+        d = json.loads(LAST_PATH.read_text(encoding="utf-8"))
+        if not d.get("items") or not d.get("as_of"):
+            return {"ok": True, "saved": None}
+        return {"ok": True, "saved": d}
+    except Exception:
+        return {"ok": True, "saved": None}

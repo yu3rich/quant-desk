@@ -136,14 +136,24 @@ def train(params: dict | None = None, only_keys: list[str] | None = None) -> dic
     if not keys:
         return {"ok": False, "error": "训练集里没有任何可用因子列，请重新构造训练集"}
     ds_neutral = dsm.get("neutral") or "none"
-    Xtr, Xva = _matrix(tr, keys), _matrix(va, keys)
     # 训练目标优先用 y_target（rank 模式下是横截面分位，−0.5~0.5），
-    # 评估一律用 y_excess（% 口径），避免「拿分位当收益率念」的口径混淆
+    # 评估一律用 y_excess（% 口径），避免「拿分位当收益率念」的口径混淆。
+    # 末尾样本的未来收益还没到期时标签是 NaN：训练/验证都必须剔除，
+    # 填 0 等于告诉模型「未来不涨不跌」，会把验证期尾部的 IC 和超额算歪。
     tcol = str(dsm.get("target_col") or "y_target")
     if tcol not in ds.columns:
         tcol = "y_excess"          # 兼容旧版训练集
-    ytr = pd.to_numeric(tr[tcol], errors="coerce").fillna(0.0)
-    yva = pd.to_numeric(va[tcol], errors="coerce").fillna(0.0)
+    ytr_raw = pd.to_numeric(tr[tcol], errors="coerce")
+    yva_raw = pd.to_numeric(va[tcol], errors="coerce")
+    if not ytr_raw.notna().all():
+        tr, ytr_raw = tr.loc[ytr_raw.notna()], ytr_raw[ytr_raw.notna()]
+    if not yva_raw.notna().all():
+        va, yva_raw = va.loc[yva_raw.notna()], yva_raw[yva_raw.notna()]
+    if tr.empty or va.empty:
+        return {"ok": False, "error": "剔除未到期标签后训练集或验证集为空，请重建训练集"}
+    tr_days, va_days = set(tr["_daykey"]), set(va["_daykey"])
+    ytr, yva = ytr_raw.astype(float), yva_raw.astype(float)
+    Xtr, Xva = _matrix(tr, keys), _matrix(va, keys)
     lo, hi = Xtr.quantile(0.005), Xtr.quantile(0.995)
     Xtr, Xva = Xtr.clip(lo, hi, axis=1), Xva.clip(lo, hi, axis=1)
 
@@ -193,6 +203,10 @@ def train(params: dict | None = None, only_keys: list[str] | None = None) -> dic
     vdf = va[["_daykey", "y_excess", "y_fwd", "industry"]].copy() \
         if "industry" in va.columns else va[["_daykey", "y_excess", "y_fwd"]].copy()
     vdf["pred"] = pred
+    vdf["y_excess"] = pd.to_numeric(vdf["y_excess"], errors="coerce")
+    vdf = vdf[vdf["y_excess"].notna()].copy()
+    if vdf.empty:
+        return {"ok": False, "error": "验证集没有可用的未来收益标签，请重建训练集"}
     top = (vdf.groupby("_daykey", group_keys=False)
            .apply(lambda g: g.nlargest(max(1, int(len(g) * 0.2)), "pred"), include_groups=False))
     label_mode = str(dsm.get("label_mode") or "market")
@@ -248,11 +262,16 @@ def train(params: dict | None = None, only_keys: list[str] | None = None) -> dic
         notes.append(warning)
     missing = [k for k in screener.FEATURE_KEYS if k not in keys]
     if missing:
-        notes.append("本次训练缺少 %d 个因子（%s），其中含行业类因子；重建训练集后重训即可纳入。"
-                     % (len(missing), "、".join(missing[:4])))
+        ind_missing = [k for k in missing if k in screener.IND_KEYS]
+        notes.append("本次训练缺少 %d 个因子（%s）%s；重建训练集后重训即可纳入。"
+                     % (len(missing), "、".join(missing[:4]),
+                        "，其中含行业类因子" if ind_missing else ""))
     if ds_neutral == "none":
         notes.append("训练集按原始因子训练（未做行业中性化）：实测把行业 β 一并剥掉会让 RankIC 下降，"
                      "所以保留行业暴露；要纯个股 α 可在构造训练集时选「行业中性」。")
+    # 训练集口径必须取数据集自己记录的版本，不能记成「当前代码版本」：
+    # 否则拿旧因子集训练完却标成新版本，freshness 的漂移检查会失灵。
+    ds_fv = dsm.get("feature_version", screener.FEATURE_VERSION)
     meta = {"ok": True, "engine": engine, "version": LGB_VER if LGB_OK else "numpy",
             "trained": _now(), "rows_train": int(len(tr)), "rows_valid": int(len(va)),
             "train_days": len(tr_days), "valid_days": len(va_days),
@@ -260,9 +279,13 @@ def train(params: dict | None = None, only_keys: list[str] | None = None) -> dic
             "valid_start": days[cut], "purge_days": gap,
             "best_iteration": best_iter,
             "params": p, "metrics": metrics, "feature_importance": importance,
-            "features": keys, "feature_version": screener.FEATURE_VERSION,
+            "features": keys, "feature_version": ds_fv,
             "neutral": ds_neutral, "label_mode": dsm.get("label_mode", "market"),
-            "dataset": {k: dsm.get(k) for k in ("horizon", "step", "start", "end", "rows", "symbols", "neutral")},
+            "dataset": {k: dsm.get(k) for k in
+                        ("horizon", "step", "start", "end", "date_max", "rows",
+                         "symbols", "neutral", "label_mode", "feature_version",
+                         "generated")},
+            "dataset_generated": dsm.get("generated", ""),
             "target": dsm.get("label", "未来 N 日超额收益（%）"),
             "warning": " ".join(notes),
             "model_file": str(MODEL_PATH) if LGB_OK else str(MODEL_META)}
@@ -336,6 +359,15 @@ def score_snapshot(rows: list[dict] | None = None, use_model: bool = True,
         pass
     want = (neutral or "auto").strip()
     meta = _meta()
+    # 旧快照没有 total_mv 列；选「行业+市值」时补一份当期市值，
+    # 否则市值中性化会被静默跳过（模型/基准分都以为做了，实际只做了行业）。
+    if ((want == "industry+size") or
+            (want == "auto" and meta.get("neutral") == "industry+size")):
+        if "total_mv" not in df.columns:
+            try:
+                df, _mv_day = screener.attach_market_cap(df)
+            except Exception:
+                pass
     model_ready = bool(use_model and meta.get("ok") and (
         (meta.get("engine") == "lightgbm" and MODEL_PATH.exists()) or
         (meta.get("engine") == "ridge-fallback" and (SCREEN_DIR / "ridge.json").exists())))
@@ -392,6 +424,13 @@ def score_snapshot(rows: list[dict] | None = None, use_model: bool = True,
         info["size"] = _n.size_available()
     except Exception:
         pass
+    if str(used) == "industry+size":
+        applied = bool("total_mv" in df.columns and
+                       (info.get("size") or {}).get("available"))
+        info["size_applied"] = applied
+        if not applied:
+            extra_warn = ((extra_warn + " ") if extra_warn else "") + \
+                "市值数据不可用，市值中性化已跳过（实际只做了行业中性）。"
     # 快照自身的提示（历史截止日、剔除落后样本）必须透出，否则用户看不到数据日被谁改过
     snap_warn = str((snapshot_meta or {}).get("warning") or "").strip()
     warns = [x for x in (snap_warn, warning, extra_warn) if x]

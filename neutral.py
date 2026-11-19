@@ -99,9 +99,12 @@ def neutral_z(df: pd.DataFrame, keys: list[str], mode: str = "industry",
 
 
 def _size_neutralize(df: pd.DataFrame, z: pd.DataFrame) -> pd.DataFrame:
-    """对 log 总市值做逐列截面回归取残差。数据不够就原样返回（宁可不做，也不猜）。"""
-    info = size_available()
-    if not info["available"]:
+    """对 log 总市值做逐列截面回归取残差。数据不够就原样返回（宁可不做，也不猜）。
+
+    注意：这里只看当前 DataFrame 是否有足够的 total_mv，不查「当前估值快照」。
+    训练集可以从历史市值文件里带 total_mv，推理快照用当期估值，二者都能走通。
+    """
+    if "total_mv" not in df.columns:
         return z
     mv = pd.to_numeric(df["total_mv"], errors="coerce")
     ok = mv.notna() & (mv > 0)
@@ -121,12 +124,14 @@ def _size_neutralize(df: pd.DataFrame, z: pd.DataFrame) -> pd.DataFrame:
 
 
 def size_available() -> dict:
-    """市值中性化是否可用：取决于本机是否拉过 Tushare daily_basic，以及覆盖率。"""
+    """市值中性化是否可用：当期估值看 daily_basic，训练看历史市值累积。"""
     try:
         import datasource
         basic = datasource.load_basic() or {}
+        hist = datasource.mv_history_status()
     except Exception as e:
-        return {"available": False, "cover": 0, "total": 0, "reason": "读取估值数据失败：%s" % str(e)[:60]}
+        return {"available": False, "cover": 0, "total": 0, "history_days": 0,
+                "reason": "读取估值数据失败：%s" % str(e)[:60]}
     try:
         import industry
         total = len(industry.load_map())
@@ -134,9 +139,11 @@ def size_available() -> dict:
         total = 0
     cover = sum(1 for v in basic.values() if v.get("total_mv") not in ("", None))
     ratio = cover / total if total else 0.0
-    return {"available": bool(total and ratio >= SIZE_MIN_COVER), "cover": cover,
-            "total": total, "ratio": round(ratio * 100, 1),
-            "reason": "" if ratio >= SIZE_MIN_COVER else
+    history_days = int((hist or {}).get("days") or 0)
+    return {"available": bool(total and (ratio >= SIZE_MIN_COVER or history_days >= 20)),
+            "cover": cover, "total": total, "ratio": round(ratio * 100, 1),
+            "history_days": history_days,
+            "reason": "" if (ratio >= SIZE_MIN_COVER or history_days >= 20) else
                       "未拉取估值数据或覆盖不足（%d/%d），市值中性化自动跳过" % (cover, total)}
 
 
