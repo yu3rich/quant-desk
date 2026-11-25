@@ -29,19 +29,20 @@ test("上市名单 KV 用自适应标签列，不复用 44px 的 pipe-kv", () =>
     "长标签要允许折行，不能 nowrap 压进值列");
 });
 
-test("窄屏导航可换行、候选表收紧列宽，不靠隐藏横滚", () => {
+test("窄屏导航改侧滑抽屉、候选表收紧列宽", () => {
   const mid = css.slice(css.indexOf("@media(max-width:1180px)"),
                         css.indexOf("@media(max-width:980px)"));
   const narrow = css.slice(css.indexOf("@media(max-width:860px)"),
                            css.indexOf("@media(max-width:400px)"));
-  assert.match(narrow, /\.nav\{display:flex;flex-wrap:wrap/,
-    "顶部导航应换行，而不是隐藏滚动条的横滚");
-  assert.match(narrow, /\.nav-group\{display:flex;flex-wrap:wrap/,
-    "导航分组内部也要换行，否则整组仍会溢出");
+  // 15 个页签平铺换行会占掉近 1/3 首屏，所以改成汉堡 + 抽屉（细节见 mobile-nav.test.mjs）
+  assert.match(narrow, /\.nav\{position:fixed;top:0;left:0;bottom:0/,
+    "导航应改为固定定位的抽屉");
+  assert.match(narrow, /transform:translateX\(-104%\)/, "关闭时移出视口");
+  assert.match(narrow, /\.nav-toggle\{display:inline-flex\}/, "窄屏才显示汉堡按钮");
   assert.match(mid, /#scrTable \.reason\{min-width:104px/,
     "窄屏解读列要收窄，让候选表装进容器");
   assert.doesNotMatch(narrow, /\.nav\{[^}]*overflow-x:auto/,
-    "导航不能再回到隐藏滚动条的横滚");
+    "导航不能靠隐藏滚动条的横滚");
 });
 
 test("加载提示仍是原来的整屏遮罩，没有骨架层残留", () => {

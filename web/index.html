@@ -30,9 +30,14 @@
         <h1>QuantDesk</h1>
         <p class="v">本地 A 股研究工作台</p>
       </div>
+      <!-- 窄屏专用：15 个页签平铺会把首屏挤掉近三分之一，改成汉堡 + 侧滑抽屉 -->
+      <button class="nav-toggle" id="navToggle" type="button"
+              aria-label="打开导航" aria-expanded="false" aria-controls="nav">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg>
+      </button>
     </div>
 
-    <nav class="nav" aria-label="主导航">
+    <nav class="nav" id="nav" aria-label="主导航">
       <div class="nav-group">
         <div class="nav-lbl">研究</div>
         <button class="tab nav-item on" data-tab="screen" aria-selected="true">
@@ -122,6 +127,9 @@
       <p class="sf-legal">仅个人研究 · 账户只读 · 数据全部本地</p>
     </div>
   </aside>
+
+  <!-- 抽屉遮罩：只在窄屏导航展开时可见，点它或按 Esc 关闭 -->
+  <div class="nav-scrim" id="navScrim" aria-hidden="true"></div>
 
   <main class="main">
     <header class="topbar">

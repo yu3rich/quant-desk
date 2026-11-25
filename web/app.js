@@ -6891,6 +6891,7 @@ function spotlight(el, text) {
 }
 function sideTodoGo(it) {
   if (it.hub) goHub(it.hub); else switchTab(it.go);
+  navDrawer(false);   // 待办在窄屏抽屉里，跳转后要收起，否则挡住目标页
   if (it.tab) {
     const t = $('.ptab[data-ptab="' + it.tab + '"]');
     if (t && !t.classList.contains("on")) t.click();
@@ -7067,7 +7068,44 @@ async function updateStatus(preloaded) {
   const ci = $("#cfgInfo");
   if (ci) ci.textContent = cfgInfoText(r);
 }
+/* 窄屏导航抽屉：只负责开合状态。桌面端按钮不显示，调用也只会改个 class。 */
+function navDrawer(open) {
+  document.body.classList.toggle("nav-open", !!open);
+  const t = $("#navToggle");
+  if (t) t.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
 function bind() {
+  const navToggle = $("#navToggle"), navScrim = $("#navScrim");
+  const navOpen = navDrawer;
+  if (navToggle) {
+    navToggle.addEventListener("click", () => {
+      navOpen(!document.body.classList.contains("nav-open"));
+    });
+  }
+  if (navScrim) navScrim.addEventListener("click", () => navOpen(false));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && document.body.classList.contains("nav-open")) navOpen(false);
+  });
+  window.addEventListener("resize", () => {
+    // 旋屏或拖宽窗口后抽屉必须收起，否则桌面布局会留一块被锁的滚动
+    if (window.innerWidth > 860) navOpen(false);
+  });
+
+  // 顶部条只有 54px，放不下「今日待办」：窄屏把它挪进抽屉，宽屏再挪回侧栏底部。
+  // 只移动 DOM、不改内容，两个尺寸下的事件绑定（按 id 取）都不受影响。
+  const sideFoot = document.querySelector(".side-foot");
+  const navEl = $("#nav"), sideEl = document.querySelector(".sidebar");
+  const placeSideFoot = () => {
+    if (!sideFoot || !navEl || !sideEl) return;
+    const narrow = window.innerWidth <= 860;
+    const inNav = sideFoot.parentElement === navEl;
+    if (narrow && !inNav) navEl.appendChild(sideFoot);
+    else if (!narrow && inNav) sideEl.appendChild(sideFoot);
+  };
+  placeSideFoot();
+  window.addEventListener("resize", placeSideFoot);
+
   $$(".tab").forEach((t) => {
     t.setAttribute("role", "tab");
     t.id = "tab-" + t.dataset.tab;
@@ -7075,6 +7113,7 @@ function bind() {
     t.setAttribute("aria-selected", t.classList.contains("on") ? "true" : "false");
     t.addEventListener("click", () => {
       switchTab(t.dataset.tab);
+      navOpen(false);   // 选完就收起，手机上不用再点一次遮罩
       try { history.replaceState(null, "", "#" + t.dataset.tab); } catch (e) { /* file:// 下忽略 */ }
     });
   });

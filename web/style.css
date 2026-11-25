@@ -42,6 +42,17 @@ a:hover{text-decoration:underline}
 .brand h1{font-size:15px;margin:0;letter-spacing:-.01em;line-height:1.3}
 .brand .v{font-size:10.5px;color:var(--ink3);margin:1px 0 0;letter-spacing:.02em}
 
+/* ---------- 窄屏导航（汉堡 + 抽屉） ----------
+   桌面端不用：15 个页签在手机上一平铺就是 4 行、190px 高，首屏直接被挤掉三分之一。
+   这里默认全部隐藏，只在 ≤860px 的媒体查询里启用。 */
+.nav-toggle{display:none;align-items:center;justify-content:center;
+  width:38px;height:38px;flex:none;margin-left:auto;
+  border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink2);cursor:pointer}
+.nav-toggle svg{width:18px;height:18px;fill:none;stroke:currentColor;
+  stroke-width:1.6;stroke-linecap:round}
+.nav-toggle:hover{background:#f5f7fa;color:var(--ink)}
+.nav-scrim{display:none}
+
 /* ---------- 导航 ---------- */
 .nav{flex:1;overflow-y:auto;padding:12px 0 6px;margin:0 -4px}
 .nav-group{margin-bottom:14px}
@@ -945,23 +956,40 @@ summary:focus-visible,a:focus-visible{outline:2px solid var(--blue);outline-offs
 }
 @media(max-width:860px){
   .app{flex-direction:column}
-  .sidebar{width:100%;flex:none;height:auto;position:sticky;top:0;z-index:40;
-    border-right:0;border-bottom:1px solid var(--line);padding:10px 12px 9px}
-  .brand{padding:0 2px 9px;gap:8px}
-  .brand .logo{width:27px;height:27px;border-radius:7px}
+  /* 顶栏：品牌 + 汉堡，固定在顶部；刘海屏留安全区 */
+  .sidebar{width:100%;flex:none;height:54px;box-sizing:border-box;
+    display:flex;flex-direction:row;align-items:center;gap:8px;
+    position:sticky;top:0;z-index:40;border-right:0;border-bottom:1px solid var(--line);
+    padding:env(safe-area-inset-top) 12px 0}
+  .brand{padding:0;gap:8px;border:0;min-width:0;flex:1}
+  .brand .logo{width:28px;height:28px;border-radius:8px}
   .brand .logo img{width:22px;height:22px}
-  .brand h1{font-size:13.5px}
+  .brand h1{font-size:14px}
   .brand .v{display:none}
-  /* 窄屏导航改成可换行：滚动条隐藏的横滚会让右端项看起来「溢出容器」 */
-  .nav{display:flex;flex-wrap:wrap;gap:4px 5px;overflow:visible;padding:0 0 2px;margin:0;flex:none}
-  .nav-group{display:flex;flex-wrap:wrap;gap:4px 5px;margin:0}
-  .nav-lbl{display:none}
-  .nav-item{width:auto;flex:none;padding:6px 8px;font-size:12px;gap:6px;
-    border:1px solid var(--line);border-radius:16px;background:#fff}
-  .nav-item svg{width:13px;height:13px}
-  .nav-item.on{border-color:transparent}
-  /* 手机端侧栏变顶部条，待办面板收起，避免挤占首屏 */
+  .nav-toggle{display:inline-flex}
+  /* 导航变左侧抽屉：竖排、保留分组标题、触控高度 44px */
+  .nav{position:fixed;top:0;left:0;bottom:0;width:min(84vw,300px);
+    display:flex;flex-direction:column;flex-wrap:nowrap;gap:2px;
+    margin:0;padding:14px 12px calc(18px + env(safe-area-inset-bottom));
+    background:var(--card);border-right:1px solid var(--line);
+    box-shadow:0 18px 44px rgba(12,20,34,.22);z-index:60;overflow-y:auto;
+    transform:translateX(-104%);transition:transform .24s cubic-bezier(.2,.7,.3,1)}
+  body.nav-open .nav{transform:none}
+  body.nav-open{overflow:hidden}
+  .nav-scrim{display:block;position:fixed;inset:0;z-index:55;background:rgba(14,22,36,.42);
+    opacity:0;pointer-events:none;transition:opacity .2s}
+  body.nav-open .nav-scrim{opacity:1;pointer-events:auto}
+  .nav-group{display:flex;flex-direction:column;gap:2px;margin:0 0 8px}
+  .nav-lbl{display:block;padding:8px 10px 4px;margin:0}
+  .nav-item{width:100%;flex:none;justify-content:flex-start;gap:10px;
+    min-height:44px;padding:10px;border:0;border-radius:9px;background:none;font-size:14px}
+  .nav-item svg{width:16px;height:16px}
+  .nav-item.on{background:var(--blue-soft)}
+  /* 顶部条放不下待办：默认藏起来，等 JS 把它挪进抽屉后再显示（见 .nav .side-foot） */
   .side-foot{display:none}
+  .nav .side-foot{display:block;margin-top:auto;padding:12px 4px 0;
+    border-top:1px solid var(--line2);flex:none}
+  .nav .sf-todo-list{max-height:none}
   .main{padding:14px 12px 56px;order:1}
   .topbar{gap:8px;margin-bottom:11px;flex-wrap:wrap}
   .topbar h2{font-size:16px}
@@ -995,10 +1023,29 @@ summary:focus-visible,a:focus-visible{outline:2px solid var(--blue);outline-offs
   .drawer{width:100vw}
   .ov-metrics .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
+@media(max-width:860px) and (prefers-reduced-motion:reduce){
+  .nav{transition:none}
+}
 @media(max-width:400px){
   .sp-row{grid-template-columns:1fr}
 }
 @media(max-width:560px){
+  /* 触控：桌面 28~30px 的按钮在手机上太难点 */
+  .btn{min-height:38px;padding-left:14px;padding-right:14px}
+  .btn.sm{min-height:36px}
+  .rt-seg button{min-height:34px}
+  /* iOS Safari 对 <16px 的输入框聚焦时会放大整页，钉到 16px 就不会跳。
+     用 body .app 提权：.field input 这类规则是 (0,1,1)，单写 input 会被压掉。 */
+  body .app input,body .app select,body .app textarea,
+  body .app .inline input,body .app .inline select{font-size:16px}
+  /* 表格本来就是容器内横滚，字号放大一点更好读 */
+  table{font-size:12.5px}
+  .card{padding:14px}
+  .topbar{gap:6px;margin-bottom:10px}
+  /* 图表按手机高度收缩，避免一张图占满两屏 */
+  .chart{height:250px}
+  .chart.mid{height:220px}
+  .chart.tall{height:320px}
   .scr-detail-grid{grid-template-columns:repeat(2,1fr)}
   .scr-form{grid-template-columns:1fr}
   .mini-inner{grid-template-columns:1fr}
