@@ -18,12 +18,25 @@ import csv
 import datetime as dt
 import json
 import math
+import os
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 import histcache
+
+
+def _atomic_csv(df, path) -> None:
+    """先写临时文件再原子替换。
+
+    直接 to_csv 是「先截断、再逐行写」，同进程的 Flask 请求线程在这几十毫秒
+    里读到的是半截文件：要么解析失败（页面瞬间显示「无快照」），要么正好截在
+    行边界上，被当成一份残缺的候选表静默使用。os.replace 在 Windows 上也是原子的。
+    """
+    tmp = path.with_suffix(".csv.tmp")
+    df.to_csv(tmp, index=False, encoding="utf-8-sig")
+    os.replace(tmp, path)
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
@@ -89,6 +102,18 @@ CORE_KEYS = [f["key"] for f in FEATURES if not f.get("model_only")]
 IND_KEYS = [f["key"] for f in FEATURES if f.get("model_only")]
 DIRECTIONS = {f["key"]: f["direction"] for f in FEATURES}
 FEATURE_VERSION = 3      # 因子集版本：模型/训练集元数据里记录，版本不同时明确提示重训
+# 退化判据：「区间位置」类因子（布林带 / RSV / K 线实体）的分母是区间宽度，
+# 宽度为 0 时该因子无定义。难点在于「0」不是精确的：
+#   长期停牌 / 一字板时 20 天价格完全不动，std 理论上为 0，
+#   pandas 却会因累加误差算出 1e-7 ~ 5e-7 这种残差，numpy 拿到精确 0.0。
+# 于是同一只票在训练集给 0.5、在快照给 NaN —— 两条路径必须用同一个判据。
+#
+# 判据用「相对 1 元的机器精度尺度」而不是「相对股价」：股价 1.29 元时残差比值
+# 达 1.5e-6，而 34 元时只有 1.1e-7，拿价格做分母会让阈值随股价漂移。
+# 改用 STD_EPS 直接卡在「std 是否可视为 0」这一层，与价格量级无关：
+#   真实可交易的最低 std 也在 1e-4 量级（对应的日振幅已在 0.01% 以下），
+#   取 1e-5 能覆盖全部浮点噪声，又不会误伤任何真实数据。
+STD_EPS = 1e-5
 NEUTRAL_DEFAULT = "industry"
 NEUTRAL_MODES = ("industry", "industry+size", "none")
 # 标签口径：
@@ -141,14 +166,20 @@ def _num(v):
         return None
 
 
-def funnel(df: pd.DataFrame, cfg: dict | None = None) -> tuple[pd.DataFrame, list[dict]]:
-    """逐层过滤横截面，返回（保留集, 各层统计）。
+def funnel(df: pd.DataFrame, cfg: dict | None = None,
+           detail: bool = False) -> tuple:
+    """逐层过滤横截面，返回（保留集, 各层统计[, 淘汰归属]）。
 
     设计原则：只做「硬性、可解释」的剔除，缺数据一律视为「未知 → 放行」，
     并把每层淘汰数写进 stages，界面上可逐层核对，不做黑箱。
+
+    detail=True 时额外返回 {code: 被哪一层淘汰}，供决策档案记录。
+    这件事有意义的地方在事后归因：只看「淘汰了多少只」没法回答
+    「被极端风险层淘汰的票，后来是不是反而涨得更好」。
     """
     c = {**FUNNEL_DEFAULT, **(cfg or {})}
     stages: list[dict] = []
+    killed: dict[str, str] = {}
 
     def rec(key, name, before, after, note, enabled=True):
         stages.append({"key": key, "name": name, "before": int(before), "after": int(after),
@@ -226,7 +257,29 @@ def funnel(df: pd.DataFrame, cfg: dict | None = None) -> tuple[pd.DataFrame, lis
 
     # 6) 排序取候选池（截断由 select() 做，这里只记录进入排序的数量）
     rec("rank", "进入打分排序", len(cur), len(cur), "按分数降序，随后受 TopN 与行业上限约束", True)
-    return cur, stages
+    if not detail or "code" not in df.columns:
+        return cur, stages
+    # 定位「谁被哪层淘汰」：逐层单独重跑一次（纯布尔运算，5500 行约 5ms）。
+    # 这样做而不是在每层里埋点，是为了让「过滤逻辑」只写一遍 ——
+    # 两处各写一份 mask 迟早会不一致，而归因结果一旦错位就完全失去意义。
+    remain = set(df["code"].astype(str))
+    for key, name in (("quality", "数据完整性"), ("st", "ST 与退市"),
+                      ("extreme", "极端风险"), ("liquidity", "流动性"), ("trend", "趋势")):
+        if not remain:
+            break
+        c2 = {**FUNNEL_DEFAULT, **(cfg or {})}
+        for kk in ("quality", "st", "extreme", "liquidity", "trend"):
+            c2[kk] = False
+        c2[key] = True
+        try:
+            keep, _ = funnel(df[df["code"].astype(str).isin(remain)], c2)
+            kept = set(keep["code"].astype(str))
+        except Exception:
+            break
+        for code in remain - kept:
+            killed.setdefault(code, name)
+        remain &= kept
+    return cur, stages, killed
 
 
 def _ind_label(v) -> str:
@@ -290,11 +343,34 @@ def select(scored: pd.DataFrame, topn: int = 10, cap: int | None = None) -> dict
     }
 
 
-def record_picks(picked: list[dict], as_of: str) -> dict:
+META_KEYS = ("vol20", "vol60", "turnover", "mom5", "mom20", "mom60", "rsi14",
+             "vol_ratio", "ma_dev", "macd_hist", "dd20", "close", "score",
+             "base_score", "pv_corr", "total_mv", "pe_ttm", "pb")
+
+
+def _pick_meta(item: dict) -> dict:
+    """落盘时一并记下的因子快照与决策信息（供事后归因）。"""
+    out = {}
+    for k in META_KEYS:
+        v = item.get(k)
+        if isinstance(v, (int, float)) and v == v:
+            out[k] = round(float(v), 4)
+    for k in ("funnel_stage", "verdict", "llm_reason", "llm_delta", "llm_score",
+              "bear_case", "name", "industry"):
+        if item.get(k) not in (None, ""):
+            out[k] = item.get(k)
+    return out
+
+
+def record_picks(picked: list[dict], as_of: str, archive: dict | None = None) -> dict:
     """把当期候选落盘，供 T+N 后验闭环回看。
 
     每次选股＝一个批次（as_of + recorded_at）。同一数据日再选一次（改 TopN 或
     调参数）会新增一个批次，旧批次保留；T+N 后验也按批次聚合，实测口径可对照。
+
+    除了候选本身，还写两样东西：
+      · picks_meta  每只票的因子值与决策信息（归因要用，字段会演进，所以存 JSON）
+      · pick_archive 整批的完整快照（含被淘汰的候选与理由），半年后复盘才有据可查
     """
     if not picked:
         return {"ok": True, "added": 0, "total": 0}
@@ -312,8 +388,24 @@ def record_picks(picked: list[dict], as_of: str) -> dict:
         added, replaced, total = store.picks_replace(as_of, rows)
     except Exception as e:
         return {"ok": False, "error": str(e), "added": 0, "total": 0}
-    return {"ok": True, "added": added, "replaced": replaced,
-            "total": total, "file": str(store.DB_PATH)}
+    meta_n, aid = 0, 0
+    try:
+        meta = [{"code": str(x.get("code")).zfill(6), **_pick_meta(x)} for x in picked]
+        meta_n = store.picks_meta_put(as_of, now, meta)
+    except Exception as e:
+        try:
+            store.log("screener", "选股附注写入失败：%s" % e, level="warn", act="picks")
+        except Exception:
+            pass
+    if archive:
+        try:
+            aid = store.archive_put(as_of, now, dict(archive, recorded_at=now,
+                                                     as_of=as_of, count=len(picked)))
+        except Exception:
+            aid = 0
+    return {"ok": True, "added": added, "replaced": replaced, "total": total,
+            "recorded_at": now, "meta": meta_n, "archive_id": aid,
+            "file": str(store.DB_PATH)}
 
 
 
@@ -431,6 +523,11 @@ def feature_frame(d: pd.DataFrame) -> pd.DataFrame:
     out["macd_hist"] = hist
     out["rsi14"] = rsi
     out["boll_pos"] = (c - dn) / (up - dn).replace(0, np.nan)
+    # 价格连续 20 天完全不动（长期停牌、一字板）时 std 理论上为 0，布林带宽度退化，
+    # 「在带内的位置」没有定义。pandas 的滚动 std 会给出 1e-7 量级的浮点残差，
+    # 于是 (up-dn) 非零、除出 0.5 这种「看着合理其实无意义」的值；
+    # numpy 路径拿到的是精确 0.0，返回 NaN。用 STD_EPS 统一判成 NaN。
+    out.loc[sd20.fillna(0.0) <= STD_EPS, "boll_pos"] = np.nan
     out["dd20"] = (c / h.rolling(20, min_periods=20).max() - 1) * 100
     out["vol20"] = ret.rolling(20, min_periods=20).std() * 100
     out["vol60"] = ret.rolling(60, min_periods=60).std() * 100
@@ -447,6 +544,11 @@ def feature_frame(d: pd.DataFrame) -> pd.DataFrame:
     out["klen"] = (h - l) / o * 100
     out["ksft"] = (c - o) / rng
     out["rsv20"] = (c - low20) / (high20 - low20).replace(0, np.nan)
+    # 一字板 / 长期停牌时当日或 20 日区间宽度为 0，「收盘在区间里的位置」无定义。
+    # 与 boll_pos 同理：宽度可能只是浮点残差而非精确 0，用 STD_EPS 统一判成 NaN，
+    # 保证两条实现路径给出同一个答案。
+    out.loc[(h - l).abs() <= STD_EPS, "ksft"] = np.nan
+    out.loc[(high20 - low20).abs() <= STD_EPS, "rsv20"] = np.nan
     out["cntp20"] = (ret > 0).astype(float).where(ret.notna()).rolling(20, min_periods=20).mean()
     out["corr20"] = c.rolling(20, min_periods=20).corr(v)
     out["close"] = c
@@ -482,36 +584,81 @@ def last_features(d: pd.DataFrame) -> dict | None:
     构造 Series 的固定开销，跟数据量无关；1500 只就是 20 秒，页面卡在这里。
     这里直接对 numpy 数组算末尾值，快 30 倍以上。
 
-    口径必须与 feature_frame().iloc[-1] 一致 —— 逐项对照见 last_features_raw
-    的校验说明，改动任何一个公式都要重跑对照。
+    口径必须与 feature_frame().iloc[-1] 一致 —— 这是硬约束，现已由
+    tests_factor_consistency.py（逐只）与 screener._consistency_probe（建快照时
+    自动抽样）双重看住，改动任何一个公式都要跑一次。
     """
     if d is None or len(d) < 80:
         return None
-    return _lf_arrays(
-        d["close"].to_numpy("f8"), d["open"].to_numpy("f8"),
-        d["high"].to_numpy("f8"), d["low"].to_numpy("f8"),
-        d["volume"].to_numpy("f8"),
-        d["amount"].to_numpy("f8") if "amount" in d.columns else None,
-        d["turnover"].to_numpy("f8") if "turnover" in d.columns else None,
-        str(d["date"].iloc[-1])[:10])
+    return _lf_arrays(_frame_cols(d))
 
 
 def last_features_raw(code: str, n: int = 200) -> dict | None:
-    """直接从 CSV 尾部读数组算因子，跳过 DataFrame（省掉 pandas 1.5 ms 固定开销）。"""
+    """从库尾直接读数组算因子，跳过 DataFrame（省掉 pandas 1.5 ms 固定开销）。"""
     import histcache
     a = histcache.ohlcv(code, n)
     if not a or len(a["c"]) < 80:
         return None
-    return _lf_arrays(a["c"], a["o"], a["h"], a["l"], a["v"], a["a"], a["t"], a["date"][-1])
+    return _lf_arrays(_ohlcv_cols(a))
 
 
-def _lf_arrays(c, o, h, l, v, a, t, date_str: str) -> dict | None:
-    """因子计算的唯一实现：输入 numpy 列，输出最后一根 bar 的因子字典。"""
+def _frame_cols(d: pd.DataFrame) -> dict:
+    """DataFrame -> 按列名索引的数组字典（快照路径的取数口）。
+
+    参考 Qlib 的 DataHandlerLP：它的训练与推理数据来自同一个 handler 的
+    `_learn` / `_infer`，靠「同一套 processor」保证两边口径一致，而不是靠
+    「两份实现各自小心」。这里做不到只留一份实现（DataFrame 版本要给
+    build_dataset 逐期算，numpy 版本要给全市场逐只算，性能差 30 倍），
+    但可以做到**所有取数都经过按列名的映射**：位置对齐只在一个地方发生，
+    而那个地方是可以被测试一次性钉死的。
+    """
+    def col(name, default=None):
+        if name not in d.columns:
+            return default
+        return d[name].to_numpy("f8")
+
+    return {
+        "c": col("close"), "o": col("open"), "h": col("high"), "l": col("low"),
+        "v": col("volume"), "a": col("amount"), "t": col("turnover"),
+        "date": str(d["date"].iloc[-1])[:10],
+    }
+
+
+def _ohlcv_cols(a: dict) -> dict:
+    """histcache.ohlcv 的返回值 -> 同一个按列名字典。
+
+    ohlcv 内部已经把 9 列映射成 o/h/l/c/v/a/t 这些**具名键**，
+    这里只做一次转手，不再按下标取数 —— 历史上正是 `arr[:,6]` 这种
+    位置索引把 turnover 取成了 pct（turnover 在 arr[:,7]）。
+    """
+    return {
+        "c": a["c"], "o": a["o"], "h": a["h"], "l": a["l"],
+        "v": a["v"], "a": a.get("a"), "t": a.get("t"),
+        "date": str(a["date"][-1])[:10],
+    }
+
+
+def _lf_arrays(a: dict) -> dict | None:
+    """因子计算的唯一实现：输入按列名字典，输出最后一根 bar 的因子字典。
+
+    签名从「7 个位置参数」改成「一个按列名的 dict」，是这次重构的核心：
+    位置参数一旦增删一列，调用方不会报错、只会静默错位（历史 bug 的成因）；
+    具名键取不到就是 KeyError，当场炸出来。
+    """
+    c = a["c"]
+    o = a["o"]
+    h = a["h"]
+    l = a["l"]
+    v = a["v"]
+    amt = a.get("a")
+    t = a.get("t")
+    date_str = a.get("date", "")
     n = len(c)
     if n < 80:
         return None
     v = np.where(v == 0, np.nan, v)
-    a = np.zeros(n) if a is None else np.where(a == 0, np.nan, a)
+    # 金额列missing时用全 0 填充：amount_ratio 会得到 NaN（未知），不会被当成有数据
+    amt = np.zeros(n) if amt is None else np.where(amt == 0, np.nan, amt)
     t = np.zeros(n) if t is None else t
     out: dict = {"date": str(date_str)[:10], "close": float(c[-1])}
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -527,7 +674,9 @@ def _lf_arrays(c, o, h, l, v, a, t, date_str: str) -> dict | None:
         up, dn = ma20 + 2 * sd20, ma20 - 2 * sd20
         out["dist_ma60"] = (c[-1] / ma60 - 1) * 100
         out["ma_dev"] = (c[-1] / ma20 - 1) * 100
-        out["boll_pos"] = (c[-1] - dn) / (up - dn) if up != dn else float("nan")
+        # 与 feature_frame 用同一个退化判据（见 STD_EPS 注释）
+        out["boll_pos"] = (float("nan") if sd20 <= STD_EPS
+                           else (c[-1] - dn) / (up - dn))
 
         alpha = 1.0 / 14.0
         # RSI 的 gain/loss 用「价差」而不是收益率：ewm 是线性加权，
@@ -549,16 +698,19 @@ def _lf_arrays(c, o, h, l, v, a, t, date_str: str) -> dict | None:
         amp = (h[1:] - l[1:]) / c[:-1] * 100
         out["amp20"] = _strict_mean(amp[-20:])
         out["vol_ratio"] = _strict_mean(v[-5:]) / _strict_mean(v[-20:])
-        out["amount_ratio"] = _strict_mean(a[-5:]) / _strict_mean(a[-20:])
+        out["amount_ratio"] = _strict_mean(amt[-5:]) / _strict_mean(amt[-20:])
         out["turnover"] = float(t[-1]) if n else float("nan")
 
         # ---- K 线形态 / 位置类（Alpha158 组）----
         rng = h[-1] - l[-1]
         out["kmid"] = (c[-1] / o[-1] - 1) * 100 if o[-1] else float("nan")
         out["klen"] = rng / o[-1] * 100 if o[-1] else float("nan")
-        out["ksft"] = (c[-1] - o[-1]) / rng if rng else float("nan")
+        # 一字板 / 长期停牌：区间宽度退化为 0（可能是浮点残差），位置无定义
+        out["ksft"] = (float("nan") if abs(rng) <= STD_EPS
+                       else (c[-1] - o[-1]) / rng)
         low20, high20 = l[-20:].min(), h[-20:].max()
-        out["rsv20"] = (c[-1] - low20) / (high20 - low20) if high20 != low20 else float("nan")
+        out["rsv20"] = (float("nan") if abs(high20 - low20) <= STD_EPS
+                        else (c[-1] - low20) / (high20 - low20))
         r20 = ret[-20:]
         out["cntp20"] = float("nan") if np.isnan(r20).any() else float((r20 > 0).mean())
         out["corr20"] = _corr(c[-20:], v[-20:])
@@ -726,6 +878,70 @@ def _snap_item(code: str, last: dict, uni: dict) -> dict | None:
     return item
 
 
+def _consistency_probe(rows: list[dict], limit: int = 40) -> str:
+    """抽样比对「快照实际走的路径」与「训练集实际走的路径」算出的因子是否一致。
+
+    返回空字符串表示一致；否则返回一句可直接展示给人看的告警。
+
+    必须比对真正在跑的两条路，不能只比「同一份 DataFrame 的两种算法」：
+      · 训练集：store.bars_frame -> feature_frame()        pandas，按列名取数
+      · 快照：  histcache.ohlcv  -> _lf_arrays()           numpy，按位置取数
+
+    历史 bug 就出在后者：ohlcv 里写死 arr[:,6] 取 turnover，而 arr[:,6] 实际是 pct
+    （turnover 在 arr[:,7]）。所以探测必须从 last_features_raw 出发 —— 只比
+    last_features(d) 与 feature_frame(d) 的话，两者共用同一个 DataFrame，
+    永远“一致”，探测等于没做。
+    """
+    import store
+
+    picked, bad = [], []
+    step = max(1, len(rows) // max(1, limit))
+    for r in rows[::step][:limit]:
+        code = str(r.get("code") or "")
+        if not code:
+            continue
+        d = store.bars_frame(code, 200)
+        if d is None or len(d) < 80:
+            continue
+        # 快照路径：与 build_snapshot 里实际调用的一模一样
+        fast = last_features_raw(code)
+        # 训练路径：与 build_dataset 里实际调用的一模一样
+        slow_df = feature_frame(d)
+        if fast is None or slow_df is None or not len(slow_df):
+            continue
+        if str(fast.get("date"))[:10] != str(slow_df["date"].iloc[-1])[:10]:
+            bad.append((code, "__date__"))
+            continue
+        last = slow_df.iloc[-1]
+        for k in CORE_KEYS:
+            a, b = fast.get(k), last.get(k)
+            a_na = a is None or (isinstance(a, float) and math.isnan(a))
+            b_na = b is None or (isinstance(b, float) and math.isnan(b))
+            if a_na and b_na:
+                continue
+            if a_na != b_na:
+                bad.append((code, k))
+                continue
+            try:
+                fa, fb = float(a), float(b)
+            except (TypeError, ValueError):
+                continue
+            tol = max(1e-6, abs(fb) * 1e-4)
+            if abs(fa - fb) > tol:
+                bad.append((code, k))
+        picked.append(code)
+
+    if not bad:
+        return ""
+    fields = sorted({k for _c, k in bad})
+    sample = bad[0]
+    return ("因子口径自查未通过：%d 只样本里有 %d 处不一致（%s）。"
+            "例如 %s 的 %s，快照与训练集算出的不是同一个数 —— "
+            "模型会在它没训练过的特征分布上打分，请先修口径再选股。"
+            % (len(picked), len(bad), "、".join(fields[:4]),
+               sample[0], sample[1]))
+
+
 def build_snapshot(scope: str = "cached", as_of: str | None = None,
                    limit: int = 0) -> dict:
     """limit=0 表示全市场（默认）；正数则等间隔抽样，兼顾速度与代码空间覆盖。"""
@@ -780,6 +996,16 @@ def build_snapshot(scope: str = "cached", as_of: str | None = None,
     if not rows:
         return {"ok": False, "error": "没有落在同一交易日的有效样本"}
     snap = pd.DataFrame(rows)
+    # 口径自查：快照走 last_features_raw（numpy 按位置取数），训练集走 feature_frame
+    # （pandas 按列名取数）。两条路径一旦不一致，模型吃到的是它没训练过的分布 ——
+    # 这类错误不会抛异常，只会让分数悄悄失真（历史上 turnover 就被取成了 pct）。
+    # 建快照是唯一同时具备「全市场数据」和「值得付出这几百毫秒」的时机，
+    # 抽样 40 只做一次逐值比对，发现问题写进 warning，界面与日志都看得见。
+    warn_consistency = ""
+    try:
+        warn_consistency = _consistency_probe(rows, limit=40)
+    except Exception:
+        warn_consistency = ""
     try:
         import industry
         snap = industry.enrich(snap)      # 补「代码 → 行业」，查不到留空（不编造）
@@ -794,7 +1020,7 @@ def build_snapshot(scope: str = "cached", as_of: str | None = None,
     # 否则下次首屏复用快照时又会拿回历史日的数据。
     persist = not as_of
     if persist:
-        snap.to_csv(SNAPSHOT_CSV, index=False, encoding="utf-8-sig")
+        _atomic_csv(snap, SNAPSHOT_CSV)
     dates = sorted({r["date"] for r in rows})
     lag_days = sorted({r["date"] for r in lag_rows})
     dist = snap["industry"].replace("", "未分类").value_counts().to_dict()
@@ -813,6 +1039,8 @@ def build_snapshot(scope: str = "cached", as_of: str | None = None,
                      % (len(lag_rows), "；".join(why), base))
     if as_of:
         warns.append("当前按历史截止日 %s 计算，不是最新行情；清空「截止日」即可回到最新" % as_of)
+    if warn_consistency:
+        warns.append(warn_consistency)
     meta = {"ok": True, "generated": _now_iso(), "scope": scope, "as_of": base,
             "as_of_param": as_of or "",
             "limit": limit, "count": len(rows), "date_min": dates[0], "date_max": dates[-1],
@@ -851,9 +1079,24 @@ def _rows(df: pd.DataFrame) -> list[dict]:
     return out
 
 
+_SNAP_CACHE: dict = {"key": None, "df": None, "meta": None}
+
+
 def load_snapshot() -> tuple[pd.DataFrame | None, dict]:
+    """读横截面快照。按文件 mtime+size 缓存，返回副本。
+
+    单股分析、选股、数据中枢都会读它，每次 read_csv 5000 行约 40ms；
+    缓存后只剩一次 copy（几毫秒）。返回副本是因为调用方可能往 df 上加列。
+    """
     if not SNAPSHOT_CSV.exists():
         return None, _json_read(SNAPSHOT_META, {}) or {}
+    try:
+        st = SNAPSHOT_CSV.stat()
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None
+    if key is not None and _SNAP_CACHE.get("key") == key and _SNAP_CACHE.get("df") is not None:
+        return _SNAP_CACHE["df"].copy(), dict(_SNAP_CACHE.get("meta") or {})
     try:
         df = pd.read_csv(SNAPSHOT_CSV, dtype={"code": str})
         if "industry" in df.columns:      # 空行业读回来是 NaN，统一成空字符串
@@ -869,7 +1112,12 @@ def load_snapshot() -> tuple[pd.DataFrame | None, dict]:
                 df["industry"] = [f or o for f, o in zip(fresh, old)]
         except Exception:
             pass
-        return df, (_json_read(SNAPSHOT_META, {}) or {})
+        meta = _json_read(SNAPSHOT_META, {}) or {}
+        if key is not None:
+            _SNAP_CACHE.update(key=key, df=df, meta=meta)
+            # 缓存里那份永不外借，否则调用方加一列就把缓存污染了
+            return df.copy(), dict(meta)
+        return df, meta
     except Exception:
         return None, {}
 
@@ -880,7 +1128,7 @@ def load_snapshot() -> tuple[pd.DataFrame | None, dict]:
 
 def build_dataset(start: str = "20220101", end: str | None = None,
                   horizon: int = 10, step: int = 5,
-                  max_symbols: int = 300, scope: str = "cached",
+                  max_symbols: int = 800, scope: str = "cached",
                   neutral_mode: str = "none",
                   label_mode: str = "rank",
                   entry_lag: int = 1) -> dict:
@@ -1029,7 +1277,7 @@ def build_dataset(start: str = "20220101", end: str | None = None,
         label_desc = "未来 %d 个交易日收益 − %s（超额，%%）" % (horizon, base_desc)
     ds[FEATURE_KEYS] = ds[FEATURE_KEYS].replace([np.inf, -np.inf], np.nan).fillna(0.0)
     ds = ds.sort_values(["_daykey", "code"]).reset_index(drop=True)
-    ds.to_csv(DATASET_CSV, index=False, encoding="utf-8-sig")
+    _atomic_csv(ds, DATASET_CSV)
 
     cross = ds.groupby("_daykey").size()
     meta = {"ok": True, "generated": _now_iso(), "start": start, "end": end,

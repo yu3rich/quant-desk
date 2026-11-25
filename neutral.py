@@ -85,7 +85,10 @@ def neutral_z(df: pd.DataFrame, keys: list[str], mode: str = "industry",
 
         g = x.groupby(ind)
         mu = g.transform("mean")
-        sd = g.transform("std")
+        # ddof 必须与 zscore() 一致（都是 0）：groupby 默认 ddof=1，
+        # 会让「行业内 z」比「全市场回退 z」小 √((n−1)/n)。n=124 时差 0.4%、
+        # n=20 时差 2.6%，虽然不大，但同一批票在两套口径下不可比。
+        sd = g.transform(lambda s: s.std(ddof=0))
         cnt = g.transform("count")
         z = (x - mu) / sd
         # 行业为空 / 组内样本太少 / 组内方差退化 → 退回全市场 z（不丢样本，也不制造假信号）

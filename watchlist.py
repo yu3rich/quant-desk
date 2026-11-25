@@ -19,6 +19,8 @@ from pathlib import Path
 
 import requests
 
+import store
+
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
 DATA.mkdir(parents=True, exist_ok=True)
@@ -179,6 +181,25 @@ def resolve_names(codes: list[str], force: bool = False) -> dict:
     return {c: (_clean_name(cache.get(c)) or c) for c in codes}
 
 
+def _bar_meta() -> dict:
+    """行情缓存以 SQLite 的 bar_meta 为准。
+
+    旧 data/cache/*.csv 只是首次迁移来源，迁移完成后已清理；
+    再按文件判断会把库里有完整日线的股票全显示成「未缓存」。
+    """
+    try:
+        return store.meta_map()
+    except Exception:
+        return {}
+
+
+def _has_bars(code: str) -> bool:
+    try:
+        return store.has_code(code)
+    except Exception:
+        return False
+
+
 def lookup(code: str) -> dict:
     """单个代码校验 + 查名称，供前端添加时即时回显。"""
     c = norm_code(code)
@@ -186,7 +207,7 @@ def lookup(code: str) -> dict:
         return {"ok": False, "error": "无法识别股票代码，请输入 6 位 A 股代码"}
     n = resolve_names([c]).get(c, c)
     return {"ok": True, "code": c, "name": n,
-            "valid": bool(n and n != c), "cached": (DATA / "cache" / (c + ".csv")).exists()}
+            "valid": bool(n and n != c), "cached": _has_bars(c)}
 
 
 # --------------------------------------------------------------------------
@@ -273,14 +294,19 @@ def import_items(text: str, mode: str = "merge") -> dict:
 
 def list_view() -> dict:
     st = _state()
-    cache_dir = DATA / "cache"
+    meta = _bar_meta()  # 一次取全表，22 只和 5000 只都是一条 SQL
     items = []
     for i in st["items"]:
         c = i.get("code", "")
-        f = cache_dir / (c + ".csv")
+        m = meta.get(c) or {}
+        try:
+            rows = int(m.get("rows") or 0)
+        except (TypeError, ValueError):
+            rows = 0
         items.append({"code": c, "name": _clean_name(i.get("name")) or c,
                       "source": i.get("source", "-"), "added": i.get("added", "-"),
-                      "cached": f.exists()})
+                      "cached": bool(c and rows > 0),
+                      "bar_date": str(m.get("last_date") or ""), "bars": rows})
     return {"ok": True, "items": items, "count": len(items),
             "default": st.get("default", ""), "updated": st.get("updated", "-")}
 
@@ -355,11 +381,38 @@ def mutate(action: str, **kw) -> dict:
                             "added": dt.date.today().isoformat()})
         items = new
         st["default"] = new[0]["code"] if new else ""
+    elif action == "import":
+        # 「只加勾选 / 加入全部」走这里：text 每行「代码 名称」，mode=merge 追加去重、
+        # mode=replace 先清空。以前后端白名单没有 import，这两个按钮必然报「未知操作」。
+        mode = str(kw.get("mode") or "merge").lower()
+        text = str(kw.get("text") or "")
+        if mode == "replace":
+            items = []
+        seen = {i["code"] for i in items}
+        parsed = []
+        for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            parts = s.split()
+            cc = norm_code(parts[0])
+            if not cc or cc in seen:
+                continue
+            seen.add(cc)
+            parsed.append((cc, " ".join(parts[1:]).strip()))
+        names = resolve_names([c for c, _ in parsed]) if parsed else {}
+        for cc, nm in parsed:
+            items.append({"code": cc, "name": nm or names.get(cc, cc),
+                          "source": "批量导入",
+                          "added": dt.date.today().isoformat()})
+        extra["added"] = len(parsed)
+        if not any(i["code"] == st.get("default") for i in items):
+            st["default"] = items[0]["code"] if items else ""
     else:
         return {"ok": False, "error": "未知操作 " + str(action)}
     st["items"] = items
     _save(st)
-    return {**list_view(), "ok": True, **extra}
+    return {**list_view(), "ok": True, "total": len(items), **extra}
 
 
 def export_text(fmt: str = "txt") -> str:

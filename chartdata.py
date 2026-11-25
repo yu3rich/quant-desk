@@ -77,6 +77,15 @@ def _cache_put(k: str, v: dict) -> dict:
     return v
 
 
+def invalidate() -> None:
+    """行情落库后清空图表缓存（store.bars_write/bars_append 会调）。
+
+    只按 TTL 失效不够：补完当日 K 线后立刻看图，日线缓存最长 180 秒
+    还是旧的，用户会以为「更新没生效」。
+    """
+    _CACHE.clear()
+
+
 def _slots() -> list[str]:
     """A 股分时时间轴：09:30~11:30 + 13:00~15:00，共 241 个分钟点。"""
     out = []

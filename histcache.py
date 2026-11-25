@@ -32,15 +32,33 @@ def _drop_unclosed(d: pd.DataFrame) -> pd.DataFrame:
 def ohlcv(code: str, n: int = 200) -> dict | None:
     """最近 n 根有效日线，直接给 numpy 数组（升序）。
 
-    返回 {date: list[str], o,h,l,c,v,a: np.ndarray, t: np.ndarray}；读不到返回 None。
+    返回 {date: list[str], o,h,l,c,v,a,t: np.ndarray}；读不到返回 None。
+
+    列对齐只在这里发生一次，且**按列名映射**而不是写下标：
+    以前是 `"t": arr[:, 6]`，而 store.COLS 去掉 date 后 arr[:,6] 是 pct、
+    turnover 在 arr[:,7] —— 取错一列不会报错，只会让全市场快照的「换手率」
+    实际变成当日涨跌幅，而模型最依赖的恰好是这个特征（重要性 0.20）。
+    改成先建 列名→下标 的映射，新增/调整列时要么自动跟上、要么 KeyError 炸出来。
     """
     rows = store.bars_tail(code, n)
     if not rows:
         return None
     dates = [r[0] for r in rows]
     arr = np.asarray([[np.nan if v is None else v for v in r[1:]] for r in rows], dtype="f8")
-    out = {"date": dates, "o": arr[:, 0], "h": arr[:, 1], "l": arr[:, 2],
-           "c": arr[:, 3], "v": arr[:, 4], "a": arr[:, 5], "t": arr[:, 6]}
+    # store.COLS 含 date，bars_tail 每行是 (date, open, high, low, close, volume, amount, pct, turnover)
+    # 去掉 date 后与 arr 的列一一对应
+    names = [c for c in store.COLS if c != "date"]
+    if arr.shape[1] != len(names):
+        raise RuntimeError("bars 列数变化（%d 列 vs 期望 %d），请检查 store.COLS 与 SQL"
+                           % (arr.shape[1], len(names)))
+    idx = {name: i for i, name in enumerate(names)}
+    out = {
+        "date": dates,
+        "o": arr[:, idx["open"]], "h": arr[:, idx["high"]],
+        "l": arr[:, idx["low"]], "c": arr[:, idx["close"]],
+        "v": arr[:, idx["volume"]], "a": arr[:, idx["amount"]],
+        "t": arr[:, idx["turnover"]],
+    }
     return _drop_unclosed_arr(out)
 
 
@@ -107,6 +125,11 @@ def bulk_recent(codes, n: int = 200, workers: int = 6) -> dict:
     return out
 
 
+def _col_index() -> dict:
+    """store.COLS -> 下标。与 ohlcv 共用同一份映射，避免两处各写一套下标。"""
+    return {name: i for i, name in enumerate(store.COLS)}
+
+
 def last_bar(code: str, back: int = 1) -> dict | None:
     """倒数第 back 根已收盘 bar 的关键字段。"""
     rows = store.bars_tail(code, max(8, back + 4))
@@ -118,9 +141,11 @@ def last_bar(code: str, back: int = 1) -> dict | None:
     if len(rows) < back:
         return None
     r = rows[-back]
+    ix = _col_index()
     try:
-        return {"date": str(r[0]), "close": float(r[4]),
-                "turnover": float(r[8]) if r[8] is not None else 0.0}
+        t = r[ix["turnover"]]
+        return {"date": str(r[ix["date"]]), "close": float(r[ix["close"]]),
+                "turnover": float(t) if t is not None else 0.0}
     except Exception:
         return None
 

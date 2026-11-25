@@ -90,6 +90,86 @@ def _preview(body: str, n: int = 76) -> str:
     return ""
 
 
+SECTION_TITLES = ("今日事实", "过程复盘", "需要警惕", "明日检查")
+_BRACKET_RE = re.compile(r"^【([^】]{1,12})】\s*(.*)$")
+_HEAD_RE = re.compile(r"^#{1,6}\s+")
+
+
+def normalize_body(body: str) -> tuple[str, bool]:
+    """把旧稿的裸节标题补成 Markdown 标题，只加标记、不改文字。
+
+    只认两种明确结构：整行恰好是四节标题、行首【小节名】。
+    普通段落原样保留，避免把正文误判成标题；已是 `##` 的稿子再跑一次不会变。
+    """
+    src = str(body or "").replace("\r\n", "\n")
+    out = []
+
+    def heading(text):
+        out.append("## " + text)
+        out.append("")     # 标题与正文之间留空行，Markdown 渲染和纯文本阅读都更清楚
+
+    for line in src.split("\n"):
+        s = line.strip()
+        if not s:
+            out.append("")
+            continue
+        if s in SECTION_TITLES:
+            heading(s)
+            continue
+        # 已加过 ## 但标题后没空行的稿子，也顺手补齐（幂等）
+        if s.startswith("## ") and s[3:].strip() in SECTION_TITLES:
+            out.append(s)
+            out.append("")
+            continue
+        m = _BRACKET_RE.match(s)
+        if m and not _HEAD_RE.match(s):
+            heading(m.group(1).strip())
+            rest = m.group(2).strip()
+            if rest:
+                out.append(rest)
+            continue
+        out.append(line.rstrip())
+    lines = []
+    for x in out:
+        if x == "" and (not lines or lines[-1] == ""):
+            continue
+        lines.append(x)
+    while lines and lines[-1] == "":
+        lines.pop()
+    new = "\n".join(lines) + "\n"
+    return new, new != src.strip("\n") + "\n"
+
+
+def normalize(day) -> dict:
+    """整理单篇格式。文件不存在或已是 Markdown 结构时 changed=False。"""
+    day = _day(day)
+    if not _valid_day(day):
+        return {"ok": False, "error": "日期格式应为 YYYY-MM-DD"}
+    p = path_for(day)
+    if not p.exists():
+        return {"ok": True, "day": day, "exists": False, "changed": False}
+    try:
+        meta, body = _parse(p.read_text(encoding="utf-8", errors="replace"))
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:160], "day": day}
+    new, changed = normalize_body(body)
+    if not changed:
+        return {"ok": True, "day": day, "exists": True, "changed": False}
+    r = save(day, new, src=meta.get("src") or "manual", model=meta.get("model") or "")
+    return {**r, "changed": bool(r.get("ok"))}
+
+
+def normalize_all() -> dict:
+    """把历史日记批量补格式，返回改动清单；供一次性整理和测试使用。"""
+    try:
+        DIR.mkdir(parents=True, exist_ok=True)
+        files = sorted((f for f in DIR.glob("*.md") if _valid_day(f.stem)), key=lambda f: f.stem)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:160], "changed": []}
+    changed = [f.stem for f in files if normalize(f.stem).get("changed")]
+    return {"ok": True, "changed": changed, "count": len(changed), "total": len(files)}
+
+
 def _entry(day: str, meta: dict, body: str, exists: bool = True) -> dict:
     src = meta.get("src") or ("manual" if body else "")
     return {

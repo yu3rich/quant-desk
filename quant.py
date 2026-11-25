@@ -5,7 +5,7 @@ QuantDesk - 本地 A 股量化工作台核心引擎
 整合思路：
   主项目 AKShare（数据规范 / 复权口径 / A 股覆盖）
   + 直连通道容灾（替换 AKShare 单点限流风险）
-  + 本地 CSV 缓存（新增离线能力）
+  + 本地 SQLite 行情库（离线能力，data/quant.db）
   + ta 技术指标 / Qlib Alpha158 精简因子（替换 TA-Lib 编译依赖与 Qlib 专有二进制格式）
   + 自研事件驱动回测（吸收 backtesting.py 的简洁心智模型，补上它缺失的 A 股规则）
   + 向量化参数网格（吸收 vectorbt 快速扫描思路，规避 numba / Python 3.13 兼容风险）
@@ -448,9 +448,44 @@ DEFAULT_PARAMS = {"fast": 10, "slow": 30, "rsi_n": 14,
                   "lower": 30, "upper": 70, "threshold": 0.3}
 
 
+def _limit_pct(code: str, name: str, cfg: dict) -> float:
+    """按板块取涨跌停幅度：主板 10%、创业板/科创板 20%、北交所 30%、ST 5%。
+
+    回测只有 OHLC，用开盘涨幅判断能不能成交，阈值必须和这只票的真实限幅一致：
+    固定 10% 会把创业板 +15% 的开盘当成「没涨停」照样买入，也会把 ST 的 +6%
+    误判成涨停而错过。
+    """
+    c = str(code or "").strip()
+    if name and "ST" in str(name).upper():
+        return 0.05
+    if c[:3] in ("300", "301", "688", "689"):
+        return 0.20
+    if c[:1] in ("4", "8"):
+        return 0.30
+    try:
+        return float(cfg.get("limit_pct", 0.10))
+    except (TypeError, ValueError):
+        return 0.10
+
+
+def _downside_dev(ret, rf_daily: float = 0.02 / 252) -> float:
+    """下行偏差：sqrt(mean(min(r−MAR, 0)²)) × √252。
+
+    这是 Sortino 的分母。旧写法用「负收益子集的标准差」，只有一个负收益日时
+    std(ddof=1) 是 NaN、两个等幅负收益日时是 0，指标直接变成 0.0。
+    """
+    import numpy as _np
+    r = _np.asarray(ret, dtype=float)
+    if not r.size:
+        return 0.0
+    down = _np.minimum(r - rf_daily, 0.0)
+    return float(math.sqrt(float((down ** 2).mean())) * math.sqrt(252))
+
+
 def run_backtest(df: pd.DataFrame, strategy: str = "ma_cross",
                  params: dict | None = None, cfg: dict | None = None,
-                 capital: float | None = None, light: bool = False) -> dict:
+                 capital: float | None = None, light: bool = False,
+                 code: str = "", name: str = "") -> dict:
     cfg = cfg or load_config()
     p = dict(DEFAULT_PARAMS)
     if params:
@@ -466,7 +501,7 @@ def run_backtest(df: pd.DataFrame, strategy: str = "ma_cross",
     tax = float(cfg.get("stamp_tax", 0.0005))
     transfer = float(cfg.get("transfer_fee", 0.00001))
     slip = float(cfg.get("slippage", 0.0005))
-    limit_pct = float(cfg.get("limit_pct", 0.10))
+    limit_pct = _limit_pct(code, name, cfg)
     lot = 100
 
     dates = d["date"].tolist()
@@ -541,7 +576,7 @@ def run_backtest(df: pd.DataFrame, strategy: str = "ma_cross",
     total = final / capital - 1
     ann = (final / capital) ** (252 / n) - 1 if final > 0 else -1
     vol = float(ret.std() * math.sqrt(252))
-    downside = float(ret[ret < 0].std() * math.sqrt(252)) if (ret < 0).any() else 0.0
+    downside = _downside_dev(ret.to_numpy(dtype=float))
     sharpe = (ann - 0.02) / vol if vol > 0 else 0.0
     sortino = (ann - 0.02) / downside if downside > 0 else 0.0
     dd = eq_s / eq_s.cummax() - 1

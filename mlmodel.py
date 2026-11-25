@@ -239,6 +239,34 @@ def train(params: dict | None = None, only_keys: list[str] | None = None) -> dic
         # 预测值离散度：模型输出趋于常数就说明信号已经衰减
         "pred_std": round(float(np.std(pred)), 5) if len(pred) else None,
     }
+    # 头部超额（head excess）：TopN 相对当期池子均值的超额，逐期平均。
+    #
+    # 为什么单看 rank_ic 不够：IC 衡量的是「整条排序对不对」，而实盘只买头部。
+    # 实测出现过 IC 仍为正（0.10）却 Top10 亏损的情形 —— 全市场都在跌时，
+    # 排序能力还在，但「头部那 10 只相对池子的优势」已经消失，钱是亏的。
+    # 这个指标才对应「按榜单买入会怎样」，IC 对应「模型还懂不懂排序」，
+    # 两者背离时必须看前者。
+    try:
+        _hx = {}
+        for _n in (1, 5, 10, 20):
+            _per, _win = [], []
+            for _dk, g in vdf.groupby("_daykey"):
+                if len(g) < _n * 2:
+                    continue
+                _top = g.nlargest(_n, "pred")["y_fwd"]
+                _ex = float(_top.mean()) - float(g["y_fwd"].mean())
+                _per.append(_ex)
+                _win.append(1 if _ex > 0 else 0)
+            if _per:
+                _hx[_n] = {"mean": round(float(np.mean(_per)), 4),
+                           "win": round(float(np.mean(_win)), 3),
+                           "n": len(_per)}
+        if _hx:
+            metrics["head_excess"] = _hx
+            metrics["head10"] = _hx.get(10, {}).get("mean")
+            metrics["head10_win"] = _hx.get(10, {}).get("win")
+    except Exception:
+        pass
     # 行业超额口径的对照评估：同一批预测，把基准从「全市场均值」换成「同行业均值」，
     # 用来回答「这套打分到底是行业轮动还是个股 α」。不管标签怎么定都算一遍。
     if "industry" in vdf.columns:
@@ -329,6 +357,22 @@ def predict_frame(df: pd.DataFrame) -> np.ndarray | None:
     return _predict_matrix(_prep_infer(df, meta), meta)
 
 
+_SCORE_CACHE: dict = {"k": None, "v": None}
+
+
+def _score_cache_key(smeta: dict, rows: list, neutral: str, use_model: bool):
+    """打分缓存的指纹：快照日期 + 行数 + 首末代码 + 口径 + 模型 mtime + 特征版本。"""
+    try:
+        mtime = int(MODEL_PATH.stat().st_mtime) if MODEL_PATH.exists() else 0
+    except Exception:
+        mtime = 0
+    first = str((rows[0] or {}).get("code") or "") if rows else ""
+    last = str((rows[-1] or {}).get("code") or "") if rows else ""
+    return (str(smeta.get("as_of") or smeta.get("date_max") or ""),
+            len(rows), first, last, str(neutral or "auto"), bool(use_model),
+            mtime, screener.FEATURE_VERSION)
+
+
 def score_snapshot(rows: list[dict] | None = None, use_model: bool = True,
                    snapshot_meta: dict | None = None, neutral: str = "auto") -> dict:
     """给横截面快照打分。返回模型分（预测超额收益 %）或可解释基准分。
@@ -350,6 +394,12 @@ def score_snapshot(rows: list[dict] | None = None, use_model: bool = True,
                  if k not in ("rows", "file")}
     if not rows:
         return {"ok": False, "error": "快照为空"}
+    # 同一份快照 + 同一个模型，打分结果完全一样；单股分析、选股、页面刷新
+    # 会反复调用它，全市场 5000 行的中性化 + 推理约 400ms，缓存后只剩取行的开销。
+    # 键里带模型 mtime 与特征版本：重训或改因子口径后自动失效。
+    ck = _score_cache_key(smeta, rows, neutral, use_model)
+    if _SCORE_CACHE.get("k") == ck and _SCORE_CACHE.get("v"):
+        return dict(_SCORE_CACHE["v"])
     df = pd.DataFrame(rows)
     # 行业类因子每次按当前行业映射重算一遍：快照是几天前建的、行业映射后来升级过时，
     # 存量的 ind_mom20 / ind_rel20 会和新行业归属不一致，模型就会吃到过期特征
@@ -368,10 +418,22 @@ def score_snapshot(rows: list[dict] | None = None, use_model: bool = True,
                 df, _mv_day = screener.attach_market_cap(df)
             except Exception:
                 pass
-    model_ready = bool(use_model and meta.get("ok") and (
+    # 特征版本必须与快照口径一致：因子定义改过（窗口/ddof/单位）时，
+    # 旧模型照样能"跑通"，但吃的是它没训练过的分布，分数静默失真。
+    # 这种情况宁可降级基准分并说明，也不要用一个看起来正常的错分数。
+    try:
+        _fv = meta.get("feature_version")
+        version_ok = (_fv is None) or (int(_fv) == int(screener.FEATURE_VERSION))
+    except (TypeError, ValueError):
+        version_ok = False
+    model_ready = bool(use_model and meta.get("ok") and version_ok and (
         (meta.get("engine") == "lightgbm" and MODEL_PATH.exists()) or
         (meta.get("engine") == "ridge-fallback" and (SCREEN_DIR / "ridge.json").exists())))
     extra_warn = ""
+    if use_model and meta.get("ok") and not version_ok:
+        extra_warn = ("模型的特征版本（%s）与当前因子口径（%s）不一致，已降级为基准分；"
+                      "请重建训练集并重训模型。"
+                      % (meta.get("feature_version"), screener.FEATURE_VERSION))
     if model_ready:
         try:
             pred = _predict_matrix(_prep_infer(df, meta), meta)
@@ -434,14 +496,17 @@ def score_snapshot(rows: list[dict] | None = None, use_model: bool = True,
     # 快照自身的提示（历史截止日、剔除落后样本）必须透出，否则用户看不到数据日被谁改过
     snap_warn = str((snapshot_meta or {}).get("warning") or "").strip()
     warns = [x for x in (snap_warn, warning, extra_warn) if x]
-    return {"ok": True, "engine": engine, "score_label": score_label,
-            "warning": " ".join(warns).strip(),
-            "neutral": info, "model": model_meta, "snapshot": smeta,
-            "rows": out, "count": len(out),
-            "as_of": smeta.get("as_of") or smeta.get("date_max", ""),
-            "as_of_param": smeta.get("as_of_param", ""),
-            "is_historical": bool(smeta.get("as_of_param")),
-            "lag_excluded": smeta.get("lag_excluded", 0)}
+    result = {"ok": True, "engine": engine, "score_label": score_label,
+              "warning": " ".join(warns).strip(),
+              "neutral": info, "model": model_meta, "snapshot": smeta,
+              "rows": out, "count": len(out),
+              "as_of": smeta.get("as_of") or smeta.get("date_max", ""),
+              "as_of_param": smeta.get("as_of_param", ""),
+              "is_historical": bool(smeta.get("as_of_param")),
+              "lag_excluded": smeta.get("lag_excluded", 0)}
+    # 缓存里存原对象，返回浅拷贝：调用方只读 rows（加字段会污染下一次命中）
+    _SCORE_CACHE.update(k=ck, v=result)
+    return dict(result)
 
 
 def status() -> dict:

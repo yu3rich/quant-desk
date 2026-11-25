@@ -25,8 +25,11 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import functools
 import json
 import math
+import os
+import threading
 from pathlib import Path
 
 import requests
@@ -41,6 +44,8 @@ BASIC_CSV = EXTRA / "daily_basic.csv"
 MV_HISTORY = EXTRA / "mv_history.csv"
 HIST_FIELDS = ["trade_date", "code", "total_mv"]
 API = "https://api.tushare.pro"
+# 估值接口限频 1 次/小时：失败或「源站没给新数据」之后，这段时间内不再重复请求
+RETRY_GAP_MIN = 65
 BASIC_FIELDS = ["code", "trade_date", "close", "pe", "pe_ttm", "pb",
                 "total_mv", "circ_mv", "turnover_rate", "volume_ratio", "name"]
 
@@ -56,7 +61,8 @@ def _read() -> dict:
 
 def _write(cfg: dict):
     DATA.mkdir(parents=True, exist_ok=True)
-    tmp = SOURCES.with_suffix(".json.tmp")
+    # tmp 名带 pid：定时线程与手动请求可能同时写，固定名会互相截断
+    tmp = SOURCES.with_name("sources.%d.json.tmp" % os.getpid())
     tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(SOURCES)
 
@@ -130,7 +136,7 @@ def _append_mv_history(date: str, rows: list[dict]) -> None:
         cur.append({"trade_date": date, "code": code,
                     "total_mv": round(mv / 10000, 4)})   # 万元 → 亿元
     EXTRA.mkdir(parents=True, exist_ok=True)
-    tmp = MV_HISTORY.with_suffix(".csv.tmp")
+    tmp = MV_HISTORY.with_name("mv_history.%d.csv.tmp" % os.getpid())
     with tmp.open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=HIST_FIELDS)
         w.writeheader()
@@ -187,15 +193,82 @@ def call(api_name: str, params: dict | None = None, fields: str = "") -> list[di
 
 
 def latest_trade_date(lookback: int = 15) -> str:
-    """最近的交易日（YYYYMMDD）；用 trade_cal 判断，避免周末/节假日拉到空数据。"""
+    """最近的交易日（YYYYMMDD）。
+
+    优先读本地交易所日历（零请求）：低积分账号的 trade_cal 限频 1 次/小时，
+    把它放在估值链路上会让「拉估值」整段随机失败，而失败是静默的 —— 页面照样
+    显示一个有值的旧日期。本地日历不可用时才问 Tushare，并且取 max：
+    接口返回顺序不保证升序，早先取 opened[-1] 拿到的是查询窗口首日
+    （2026-11-20 那天拿到 11-05），估值就永久停在两周前，谁都不会发现。
+    """
     end = dt.date.today()
+    try:
+        import pipeline
+        # 先问「此刻应该已经入库的最新交易日」：17:45 之前今天的日线本来就没有，
+        # 估值还更晚（19:30），直接拿今天去请求 daily_basic 只会拿到空数据，
+        # 白烧一次 1 次/小时的配额。
+        ready = pipeline._val_expected()
+        if ready:
+            # 日历过期时 _expected_day 会给出一个去年的日期，不能当真；
+            # 只有「离今天 10 天以内」才认。
+            if (end - dt.datetime.strptime(ready, "%Y-%m-%d").date()).days <= 10:
+                return ready.replace("-", "")
+        days = pipeline._market_days(end.strftime("%Y%m%d"))
+        if days:
+            last = days[-1]
+            # 本地日历过期（只覆盖到去年）时不能拿它当「最新交易日」，
+            # 否则会以为早就拉全了，时效检查跟着一起失真。
+            if (end - dt.datetime.strptime(last, "%Y%m%d").date()).days <= 10:
+                return last
+    except Exception:
+        pass
     start = end - dt.timedelta(days=lookback)
-    rows = call("trade_cal", {"exchange": "SSE",
-                              "start_date": start.strftime("%Y%m%d"),
-                              "end_date": end.strftime("%Y%m%d")}, "cal_date,is_open")
-    opened = [r["cal_date"] for r in rows if str(r.get("is_open")) == "1"
+    try:
+        rows = call("trade_cal", {"exchange": "SSE",
+                                  "start_date": start.strftime("%Y%m%d"),
+                                  "end_date": end.strftime("%Y%m%d")}, "cal_date,is_open")
+    except Exception:
+        # 限频 / 断网：退回本地行情数据日。它至少是「确实有 K 线的一天」，
+        # 比拿今天去请求一个不存在的交易日强。
+        try:
+            import store
+            return store.data_day().replace("-", "")
+        except Exception:
+            return ""
+    opened = [str(r["cal_date"]) for r in rows if str(r.get("is_open")) == "1"
               and str(r["cal_date"]) <= end.strftime("%Y%m%d")]
-    return opened[-1] if opened else end.strftime("%Y%m%d")
+    return max(opened) if opened else end.strftime("%Y%m%d")
+
+
+def _mark_try():
+    """记一次「尝试拉取」的时间（不影响 last_date / last_fetch 两个事实字段）。"""
+    try:
+        cfg = _read()
+        t = dict(cfg.get("tushare") or {})
+        t["last_try"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cfg["tushare"] = t
+        _write(cfg)
+    except Exception:
+        pass
+
+
+def _prev_trade_day(day: str) -> str:
+    """上一个交易日（YYYYMMDD）：本地日历优先，取不到退回「减一天」。"""
+    d = str(day or "").replace("-", "")
+    if not d:
+        return ""
+    try:
+        import pipeline
+        days = [x for x in pipeline._market_days(d) if x < d]
+        if days:
+            return days[-1]
+    except Exception:
+        pass
+    try:
+        return (dt.datetime.strptime(d, "%Y%m%d").date()
+                - dt.timedelta(days=1)).strftime("%Y%m%d")
+    except Exception:
+        return ""
 
 
 def test() -> dict:
@@ -209,76 +282,102 @@ def test() -> dict:
         return {"ok": False, "error": str(e)[:220]}
 
 
-def fetch_daily_basic(trade_date: str | None = None, force: bool = False) -> dict:
-    """拉某个交易日的全市场估值。daily_basic 按 trade_date 一次返回全市场，1 次请求即可。
+_FETCH_LOCK = threading.Lock()
 
-    同一交易日已拉过就直接复用本地 CSV（Tushare 按积分限频，重复拉纯烧配额）；
-    force=True 才重新请求。
-    """
-    if not token():
-        return {"ok": False, "error": "未配置 Token；估值数据需要 Tushare 权限"}
-    try:
-        t = _ts()
-        date = str(trade_date or "").replace("-", "")
-        cached_ok = BASIC_CSV.exists() and int(t.get("rows") or 0) > 1000
 
-        def _reused(d):
-            return {"ok": True, "trade_date": d, "count": int(t["rows"]), "reused": True,
-                    "message": "%s 估值已在 %s 拉取（%d 只），直接复用本地；要重拉请勾选「强制重拉」"
-                               % (d, t.get("last_fetch") or "此前", int(t["rows"]))}
-
-        if not force and cached_ok:
-            if date and str(t.get("last_date") or "") == date:
-                return _reused(date)
-            # 未指定日期且今天拉过：直接复用，连 trade_cal 都不调
-            # （低积分账号 trade_cal 也限频 1 次/小时，复用路径必须零 API 调用）
-            if not date and str(t.get("last_fetch") or "")[:10] == dt.date.today().strftime("%Y-%m-%d"):
-                return _reused(str(t.get("last_date") or ""))
-        date = date or latest_trade_date()
-        rows = call("daily_basic", {"trade_date": date},
-                    "ts_code,trade_date,close,pe,pe_ttm,pb,total_mv,circ_mv,"
-                    "turnover_rate,volume_ratio")
-        if not rows:
-            return {"ok": False, "error": "%s 无估值数据（可能非交易日，或账号无 daily_basic 权限）" % date}
-        EXTRA.mkdir(parents=True, exist_ok=True)
-        tmp = BASIC_CSV.with_suffix(".csv.tmp")
-        with tmp.open("w", encoding="utf-8-sig", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=BASIC_FIELDS)
-            w.writeheader()
-            for r in rows:
-                code = str(r.get("ts_code") or "")[:6]
-                if len(code) != 6:
-                    continue
-                w.writerow({
-                    "code": code, "trade_date": r.get("trade_date") or date,
-                    "close": r.get("close") or "", "pe": r.get("pe") or "",
-                    "pe_ttm": r.get("pe_ttm") or "", "pb": r.get("pb") or "",
-                    "total_mv": r.get("total_mv") or "", "circ_mv": r.get("circ_mv") or "",
-                    "turnover_rate": r.get("turnover_rate") or "",
-                    "volume_ratio": r.get("volume_ratio") or "", "name": "",
-                })
-        tmp.replace(BASIC_CSV)
+def _single_flight(fn):
+    """同一时刻只允许一个估值抓取：定时任务与手动点「取估值」会撞在一起。"""
+    @functools.wraps(fn)
+    def wrapper(*a, **kw):
+        if not _FETCH_LOCK.acquire(blocking=False):
+            return {"ok": False, "error": "估值抓取已在运行，等它结束再试",
+                    "busy": True}
         try:
-            _append_mv_history(date, rows)
-        except Exception:
-            # 历史累积失败不能拖垮当期估值：当期 CSV 已写好，训练端会提示覆盖不足。
-            pass
-        cfg = _read()
-        t = dict(cfg.get("tushare") or {})
-        t.update({"last_fetch": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                  "last_date": date, "rows": len(rows)})
-        cfg["tushare"] = t
-        _write(cfg)
-        return {"ok": True, "trade_date": date, "count": len(rows),
-                "message": "已拉取 %s 全市场估值 %d 只（PE/PB/市值/换手/量比）" % (date, len(rows))}
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:220]}
+            return fn(*a, **kw)
+        finally:
+            _FETCH_LOCK.release()
+    return wrapper
+
+
+@_single_flight
+def fetch_daily_basic(trade_date: str | None = None, force: bool = False) -> dict:
+    """取某个交易日的全市场估值（多源按顺序降级，编排在 valsrc.py 里）。
+
+    以前这里直接调 Tushare daily_basic：没 Token、被限频、或源站还没更新，就只能继续用旧值。
+    现在交给 valsrc 排序挑源——东财 / 腾讯收盘即有数据，Tushare 负责按历史日回补，谁先把
+    「应到日」填上就用谁。本函数只负责落盘：统一成 Tushare 的字段与单位（市值万元），
+    并把当日总市值继续累积到 mv_history.csv。
+    """
+    import valsrc
+    day = str(trade_date or "").replace("-", "")[:8]
+    r = valsrc.fetch(day or None, force=force)
+    rows = r.pop("rows", []) or []
+    if not r.get("ok"):
+        return r
+    if not rows:
+        # 全部源都不可用但本地已有旧值：如实返回 stale，不要用空数据覆盖现有文件
+        return r
+    if float(r.get("cover") or 0) < 0.5:
+        # 只拿到小半个市场（单只限流、分页中断）：宁可继续用旧文件，
+        # 也不能让 900 只的半份数据把 5500 只的全市场估值覆盖掉。
+        r["stale"] = True
+        r["rows"] = []
+        r["message"] = "%s；本次覆盖率仅 %.0f%%，未覆盖现有文件" % (
+            r.get("message") or "取到部分数据", float(r.get("cover") or 0) * 100)
+        return r
+    date = str(r.get("date") or "")
+    EXTRA.mkdir(parents=True, exist_ok=True)
+    tmp = BASIC_CSV.with_name("daily_basic.%d.csv.tmp" % os.getpid())
+    with tmp.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=BASIC_FIELDS)
+        w.writeheader()
+        for x in rows:
+            code = str(x.get("ts_code") or "")[:6]
+            if len(code) != 6:
+                continue
+            rec = {k: x.get(k) for k in BASIC_FIELDS}
+            rec["code"] = code
+            rec["trade_date"] = x.get("trade_date") or date
+            rec["name"] = x.get("name") or ""
+            # 兜底：只有 TTM 市盈率的源（腾讯）不补这一下，pe 会整列为空，
+            # 下游 PE 因子、单股 PE、同行 PE 分位全部失效而 PB 看起来正常。
+            if rec.get("pe") in (None, "") and rec.get("pe_ttm") not in (None, ""):
+                rec["pe"] = rec["pe_ttm"]
+            w.writerow({k: ("" if rec.get(k) is None else rec[k]) for k in BASIC_FIELDS})
+    tmp.replace(BASIC_CSV)
+    try:
+        _append_mv_history(date, rows)
+    except Exception:
+        # 历史累积失败不能拖垮当期估值：当期 CSV 已写好，训练端会提示覆盖不足。
+        pass
+    cfg = _read()
+    t = dict(cfg.get("tushare") or {})
+    now_s = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    t.update({"last_fetch": now_s, "last_date": date, "rows": len(rows), "last_try": now_s,
+              "last_source": r.get("source") or ""})
+    cfg["tushare"] = t
+    _write(cfg)
+    return r
+
+
+_BASIC_CACHE: dict = {"key": None, "v": None}
 
 
 def load_basic() -> dict[str, dict]:
-    """代码 → 估值字段。total_mv / circ_mv 单位为亿元（Tushare 原始为万元）。"""
+    """代码 → 估值字段。total_mv / circ_mv 单位为亿元（Tushare 原始为万元）。
+
+    按文件 mtime+size 缓存：这个函数被单股分析、实盘体检、组合权重反复调用，
+    每次解析 5600 行 CSV 约 30ms。写入端用原子替换，mtime 一变缓存自然失效。
+    """
     if not BASIC_CSV.exists():
         return {}
+    try:
+        st = BASIC_CSV.stat()
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None
+    if key is not None and _BASIC_CACHE.get("key") == key:
+        return _BASIC_CACHE["v"]
     out: dict[str, dict] = {}
     try:
         with BASIC_CSV.open("r", encoding="utf-8-sig", newline="") as f:
@@ -305,13 +404,17 @@ def load_basic() -> dict[str, dict]:
                 }
     except Exception:
         return {}
+    if key is not None:
+        _BASIC_CACHE.update(key=key, v=out)
     return out
 
 
 def status() -> dict:
+    """账号与估值来源现状：Tushare 凭据 + 多源编排状态，合成一份给数据中枢用。"""
+    import valsrc
     t = _ts()
     rows = 0
-    last_date = t.get("last_date") or ""
+    last_date = str(t.get("last_date") or "")
     if BASIC_CSV.exists():
         try:
             with BASIC_CSV.open("r", encoding="utf-8-sig", newline="") as f:
@@ -320,11 +423,25 @@ def status() -> dict:
                     last_date = last_date or (r.get("trade_date") or "")
         except Exception:
             pass
+    v = valsrc.status()
+    if v.get("last_date"):
+        last_date = v["last_date"]
+    expected = v.get("expected") or ""
+    try:
+        import pipeline
+        lag = pipeline._trade_lag(last_date, expected) if expected else None
+    except Exception:
+        lag = v.get("lag")
+    on = [x["name"] for x in v.get("sources") or [] if x["enabled"] and x["role"] == "main"]
     return {"ok": True, "configured": bool(t.get("token")),
             "enabled": bool(t.get("enabled", True)),
             "token_masked": _mask(str(t.get("token") or "")),
             "last_fetch": t.get("last_fetch", ""), "last_date": last_date,
+            "last_source": str(t.get("last_source") or ""),
+            "expected": expected, "lag": lag, "stale": bool((lag or 0) > 0),
             "rows": rows, "file": str(BASIC_CSV),
             "mv_history": mv_history_status(),
-            "available": ["daily_basic（PE/PB/市值/换手/量比）"],
-            "note": "Token 仅存本机 data/sources.json；权限取决于你的 Tushare 积分"}
+            "valuation": v,
+            "available": on,
+            "note": "估值按「东财 → 腾讯 → Tushare」顺序降级，可在上面逐个开关；"
+                    "Token 仅存本机 data/sources.json"}

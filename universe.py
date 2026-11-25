@@ -71,13 +71,36 @@ def _write(rows: list[dict]):
             w.writerow({k: r.get(k, "") for k in FIELDS})
 
 
+def _target_day() -> str:
+    """名单应该更新到哪一天：最近一个「该出数据」的交易日（与行情应到日同口径）。
+
+    按自然日判会两头出错：周末/长假名单本来就停在周五，天天提示「非当日」
+    等于制造噪音；反过来，行情已经到今天而名单还是三天前的，才是真的漏了。
+    """
+    try:
+        import pipeline
+        return pipeline._expected_day() or ""
+    except Exception:
+        return ""
+
+
 def meta() -> dict:
     rows = _read()
     import store
     cached = set(store.cached_codes())
-    return {"ok": True, "total": len(rows),
-            "updated": rows[0].get("updated", "-") if rows else "-",
-            "fresh": bool(rows and rows[0].get("updated") == _today()),
+    updated = rows[0].get("updated", "-") if rows else "-"
+    target = _target_day()
+    lag = None
+    if target and updated and updated != "-":
+        try:
+            import pipeline
+            lag = pipeline._trade_lag(updated, target)
+        except Exception:
+            lag = None
+    # 日历不可用时退回「当天」判断，宁可多提示一次，也不要假装最新
+    fresh = bool(rows) and (lag == 0 if lag is not None else updated == _today())
+    return {"ok": True, "total": len(rows), "updated": updated,
+            "target": target, "lag": lag, "fresh": fresh,
             "cached": len([r for r in rows if r["code"] in cached]),
             "file": str(UNIVERSE_PATH)}
 

@@ -72,14 +72,29 @@ def _write_meta(m: dict):
     META_JSON.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+_ROWS_CACHE: dict = {"key": None, "v": None}
+
+
 def rows() -> list[dict]:
+    """行业归属行。按文件 mtime+size 缓存：单股分位、行业暴露、体检都要用，
+    每次重读 5000 行 CSV 约 30ms。写入走 tmp+replace，mtime 一变缓存自动失效。"""
     if not INDUSTRY_CSV.exists():
         return []
     try:
+        st = INDUSTRY_CSV.stat()
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None
+    if key is not None and _ROWS_CACHE.get("key") == key:
+        return _ROWS_CACHE["v"]
+    try:
         with INDUSTRY_CSV.open("r", encoding="utf-8-sig", newline="") as f:
-            return [r for r in csv.DictReader(f) if r.get("code")]
+            out = [r for r in csv.DictReader(f) if r.get("code")]
     except Exception:
         return []
+    if key is not None:
+        _ROWS_CACHE.update(key=key, v=out)
+    return out
 
 
 def load_map() -> dict[str, str]:
@@ -435,7 +450,14 @@ def strength(ttl: int = 300) -> dict[str, dict]:
 
 
 def _latest_day() -> str:
-    """行情缓存的最新交易日（读尾部即可，别为了一行日期扫全表）。"""
+    """行情缓存的数据日（多数股票到齐的那天）；取不到才退回读几只大票的尾部。"""
+    try:
+        import store
+        d = store.data_day()
+        if d:
+            return d
+    except Exception:
+        pass
     try:
         import histcache
         best = ""

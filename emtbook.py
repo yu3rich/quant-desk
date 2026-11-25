@@ -2,7 +2,7 @@
 """
 实盘复盘账本分析
 
-输入只有两样：emtlink 攒下来的日账本（data/ledger/*.json）与选股记录（data/screen/picks.csv）。
+输入只有两样：SQLite `ledger_days` 表里的日账本与 `picks` 表里的选股记录（都经 emtlink 读取）。
 不联网、不读行情接口，所有价格都用账本里东财返回的快照价，避免「复盘口径」与「账户口径」打两套架。
 
 产出六块：
@@ -373,15 +373,19 @@ def _trades(days: list[dict], rate: dict, avg_total: float) -> dict:
     loss_sum = abs(sum(c["pnl"] for c in losses))
     avg_win = win_sum / len(wins) if wins else 0.0
     avg_loss = loss_sum / len(losses) if losses else 0.0
-    days_n = max(1, len({f["date"] for f in fills}))
+    # 年化换手的分母是**观察窗口**（账本交易日数），不是「有成交的天数」。
+    # 用后者会把低频交易放大十几倍：180 个交易日只成交 5 天、双边成交额
+    # 等于总资产时，会算出 9760%，真实年化约 271%。
+    span_days = max(1, len(days))
+    trade_days = max(1, len({f["date"] for f in fills}))
 
     buy_amt = sum(f["qty"] * f["price"] for f in fills if f["side"] == "买入")
     top_win = max(closed, key=lambda c: c["pnl"]) if closed else None
     top_loss = min(closed, key=lambda c: c["pnl"]) if closed else None
-    # 年化换手只在样本够时才外推：3 个交易日的成交额乘 244/3 会得出几万百分比，
+    # 年化只在样本够时才外推：3 个交易日的成交额乘 244/3 会得出几万百分比，
     # 那不是「换手高」，那是样本太短。
-    annual = _r(meta["turnover"] / avg_total / days_n * 244 * 100, 1) \
-        if avg_total > 0 and days_n >= 5 else None
+    annual = _r(meta["turnover"] / avg_total / span_days * 244 * 100, 1) \
+        if avg_total > 0 and span_days >= 5 else None
 
     return {
         "fills": len(fills),
@@ -400,8 +404,9 @@ def _trades(days: list[dict], rate: dict, avg_total: float) -> dict:
         "top_win": top_win, "top_loss": top_loss,
         "closed_list": sorted(closed, key=lambda c: c["sell_date"], reverse=True)[:60],
         "turnover_rate": annual,
-        "sample_days": days_n,
-        "daily_amount": _r(meta["turnover"] / days_n) if days_n else 0.0,
+        "sample_days": trade_days,
+        "span_days": span_days,
+        "daily_amount": _r(meta["turnover"] / span_days) if span_days else 0.0,
         "buy_amount": _r(buy_amt),
         # 多少笔成交带了真实费用（其余为费率估算，会在界面上标出来）
         "real_fee_n": meta.get("real_fee_n") or 0,
@@ -557,9 +562,102 @@ def _order_quality(orders: list[dict]) -> dict:
 # 行为体检
 # --------------------------------------------------------------------------
 
+def _risk_summary(pos: dict, risk: dict, pc: dict) -> dict:
+    """持仓的「权重 × ATR × 倍数」汇总，供体检与日记引用。
+
+    同时列出已跌破 2×ATR 参考位的持仓：这个列表要能在日记的「明日检查」
+    里直接点名，而不是让用户自己拿成本价去比。
+    """
+    atr_mult = float(pc.get("atr_mult") or 2.0)
+    risk_pct = float(pc.get("risk_pct") or 0.01) * 100
+    items, below = [], []
+    for p in pos.get("items") or []:
+        m = risk.get(str(p.get("code") or "").zfill(6)) or {}
+        a = m.get("atr_pct")
+        if not a:
+            continue
+        rc = float(p.get("mv_share") or 0) / 100.0 * float(a) / 100.0 * atr_mult * 100
+        items.append({"code": p.get("code"), "name": p.get("name"),
+                      "mv_share": p.get("mv_share"), "atr_pct": a,
+                      "risk_pct": round(rc, 2)})
+        cost, price = float(p.get("cost") or 0), float(p.get("price") or 0)
+        if cost and price:
+            ref = cost * (1 - 2 * float(a) / 100.0)
+            if price < ref:
+                below.append({"code": p.get("code"), "name": p.get("name"),
+                              "cost": round(cost, 2), "price": round(price, 2),
+                              "ref": round(ref, 2), "atr_pct": a,
+                              "below_pct": round((price / ref - 1) * 100, 2)})
+    items.sort(key=lambda x: -x["risk_pct"])
+    below.sort(key=lambda x: x["below_pct"])
+    total = round(sum(x["risk_pct"] for x in items), 2)
+    return {"items": items, "risk_pct": risk_pct, "atr_mult": atr_mult,
+            "total": total,
+            "usage": round(total / risk_pct * 100, 1) if risk_pct else None,
+            "below_ref": below,
+            "over": sum(1 for x in items if x["risk_pct"] > risk_pct * 2)}
+
+
+def _plan_deviation(led: list[dict]) -> dict:
+    """最近一份目标持仓计划 vs 计划日之后的实际成交。
+
+    只回答「有多少成交不在计划里」，不评价对错：临时交易有时是必要的
+    （止损、突发消息），但占比高说明计划对执行没有约束力。
+    """
+    try:
+        import store
+        pl = store.plan_latest()
+    except Exception:
+        return {}
+    if not pl:
+        return {}
+    p = pl.get("payload") or {}
+    since = str(p.get("date") or "")[:10]
+    if not since:
+        return {}
+    planned_buy = {str(x.get("code") or "").zfill(6): x.get("name")
+                   for x in (p.get("buys") or [])}
+    planned_sell = {str(x.get("code") or "").zfill(6): x.get("name")
+                    for x in (p.get("sells") or [])}
+    fills = [f for f in _all_fills(led)
+             if str(f.get("date") or "")[:10] > since]
+    if not fills:
+        return {"ok": True, "empty": True, "since": since, "at": pl.get("at") or "",
+                "planned_buy": len(planned_buy), "planned_sell": len(planned_sell),
+                "note": "计划生成后还没有成交"}
+
+    def _amt(f):
+        return float(f.get("qty") or 0) * float(f.get("price") or 0)
+
+    ab = [f for f in fills if f.get("side") == "买入"]
+    as_ = [f for f in fills if f.get("side") == "卖出"]
+    extra_b = [f for f in ab if str(f.get("code") or "").zfill(6) not in planned_buy]
+    extra_s = [f for f in as_ if str(f.get("code") or "").zfill(6) not in planned_sell]
+    done_b = {str(f.get("code") or "").zfill(6) for f in ab} & set(planned_buy)
+    done_s = {str(f.get("code") or "").zfill(6) for f in as_} & set(planned_sell)
+    total_amt = sum(_amt(f) for f in fills) or 0
+    extra_amt = sum(_amt(f) for f in extra_b + extra_s)
+
+    def _pick(lst):
+        return [{"code": str(f.get("code") or "").zfill(6), "name": f.get("name"),
+                 "amount": round(_amt(f), 0)} for f in lst][:5]
+
+    return {"ok": True, "empty": False, "since": since, "at": pl.get("at") or "",
+            "mode": p.get("mode"), "topk": p.get("topk"), "n_drop": p.get("n_drop"),
+            "fills": len(fills),
+            "planned_buy": len(planned_buy), "planned_sell": len(planned_sell),
+            "done_buy": len(done_b), "done_sell": len(done_s),
+            "extra_buy": _pick(extra_b), "extra_sell": _pick(extra_s),
+            "extra_amt": round(extra_amt, 0), "total_amt": round(total_amt, 0),
+            "extra_ratio": round(extra_amt / total_amt * 100, 1) if total_amt else 0.0}
+
+
 def _diagnose(latest: dict, pos: dict, trades: dict, curve: dict, has_equity: bool = True,
-              cash: dict | None = None, oq: dict | None = None) -> list[dict]:
+              cash: dict | None = None, oq: dict | None = None,
+              risk: dict | None = None, dev: dict | None = None) -> list[dict]:
     out: list[dict] = []
+    risk = risk or {}
+    dev = dev or {}
     ov = latest.get("overview") or {}
     items = pos.get("items") or []
     total = _r(ov.get("total")) or 1.0
@@ -611,6 +709,137 @@ def _diagnose(latest: dict, pos: dict, trades: dict, curve: dict, has_equity: bo
                             "title": "亏损集中在 %s（占总亏损 %.0f%%）" % (worst["name"], share),
                             "detail": "单只亏损 %.2f 元、%.1f%%。集中亏损往往来自「不肯认错」，"
                                       "而不是看错了方向。" % (worst["pnl"], worst["pnl_pct"])})
+
+    # ---- 风险预算 / ATR 参考位 / 换手规则 / Kelly 上限 ----
+    try:
+        import portfolio
+        pc = portfolio.cfg()
+        risk_pct = float(pc.get("risk_pct") or 0.01) * 100
+        atr_mult = float(pc.get("atr_mult") or 2.0)
+        kelly_scale = float(pc.get("kelly_scale") or 0.25)
+        n_drop = int(pc.get("n_drop") or 0)
+        topk = int(pc.get("topk") or 0)
+    except Exception:
+        pc, risk_pct, atr_mult, kelly_scale, n_drop, topk = {}, 1.0, 2.0, 0.25, 0, 0
+
+    rk = []
+    for p in items:
+        m = risk.get(str(p.get("code") or "").zfill(6)) or {}
+        a = m.get("atr_pct")
+        if not a:
+            continue
+        rc = float(p.get("mv_share") or 0) / 100.0 * float(a) / 100.0 * atr_mult * 100
+        rk.append((p, float(a), rc))
+    if rk:
+        p, a, rc = max(rk, key=lambda x: x[2])
+        if rc > risk_pct * 2:
+            out.append({"level": "warn",
+                        "title": "单票波动风险 %.2f%% 超预算（%s）" % (rc, p.get("name")),
+                        "detail": "按 %.1f%% 权重 × ATR %.2f%% × %g 倍估算，单日波动约占总资产 %.2f%%，"
+                                  "超过 %.2f%% 预算的两倍。集中度不只看权重，也要看波动；"
+                                  "同样的仓位，高波动票占用的风险预算是低波动票的数倍。"
+                                  % (float(p.get("mv_share") or 0), a, atr_mult, rc, risk_pct)})
+        for p, a, _rc in rk:
+            cost = float(p.get("cost") or 0)
+            price = float(p.get("price") or 0)
+            if not cost or not price:
+                continue
+            ref = cost * (1 - 2 * a / 100.0)
+            if price < ref:
+                out.append({"level": "warn",
+                            "title": "%s 已跌破 2×ATR 参考位" % p.get("name"),
+                            "detail": "成本 %.2f、现价 %.2f，2×ATR 参考位 %.2f（ATR %.2f%%）。"
+                                      "跌破不等于必须卖，但说明这笔持仓的波动已超出建仓时的常态，"
+                                      "需要核对当初的持有理由是否还成立。"
+                                      % (cost, price, ref, a)})
+                break
+
+    # 实际换手 vs Topk-Drop 规则
+    if n_drop > 0 and topk > 0 and trades.get("turnover_rate"):
+        rule = 2.0 * n_drop / topk * 100 * 252
+        if trades["turnover_rate"] > rule * 2:
+            out.append({"level": "warn",
+                        "title": "实际换手约为调仓规则的 %.1f 倍"
+                                 % (trades["turnover_rate"] / rule),
+                        "detail": "Topk-Drop 规则（topk=%d、n_drop=%d）对应年化换手约 %.0f%%，"
+                                  "账本实际约 %.0f%%。多出来的部分来自规则外的临时交易，"
+                                  "通常也是费用和滑点的主要来源。"
+                                  % (topk, n_drop, rule, trades["turnover_rate"])})
+
+    # 仓位 vs Kelly 上限
+    wr, pl = trades.get("win_rate"), trades.get("pl_ratio")
+    if wr and pl:
+        try:
+            import portfolio
+            f = portfolio.kelly_fraction(wr, pl, kelly_scale)
+        except Exception:
+            f = None
+        if f is not None:
+            mv = float(ov.get("mv") or 0) or sum(float(p.get("mv") or 0) for p in items)
+            exposure = (mv / total * 100) if total else 0
+            if f <= 0 and exposure > 20:
+                out.append({"level": "warn",
+                            "title": "Kelly 判定无正优势，当前仓位 %.0f%%" % exposure,
+                            "detail": "按账本胜率 %.0f%%、盈亏比 %.2f 计算，Kelly 分数为负："
+                                      "这套交易结构没有可放大的统计优势。此时保持较高仓位，"
+                                      "本质上是在用资金换样本，而不是执行一个正期望策略。"
+                                      % (wr, pl)})
+            elif f > 0 and exposure > f * 150:
+                out.append({"level": "warn",
+                            "title": "仓位 %.0f%% 高于 Kelly 上限 %.0f%%"
+                                     % (exposure, f * 100),
+                            "detail": "按 %.0f%% 胜率、%.2f 盈亏比、%.2f 折算比例，"
+                                      "Kelly 建议总仓位不超过 %.1f%%。超出部分没有统计优势支撑。"
+                                      % (wr, pl, kelly_scale, f * 100)})
+
+    # 持仓成本 vs 同行估值分位：只陈述「成本在同行里的位置」
+    if items:
+        try:
+            import riskview
+            vals = riskview.valuation_batch(
+                [(p.get("code"), p.get("price")) for p in items])
+        except Exception:
+            vals = {}
+        high = []
+        for p in items:
+            v = vals.get(str(p.get("code") or "").zfill(6)) or {}
+            band = v.get("price_band_pe") or []
+            cost = float(p.get("cost") or 0)
+            if len(band) == 3 and cost and cost > float(band[2]):
+                high.append((p, float(band[2]), v))
+        if high:
+            high.sort(key=lambda x: -(float(x[0].get("cost") or 0) / x[1]))
+            p, q75, v = high[0]
+            out.append({"level": "warn",
+                        "title": "%d 只持仓成本高于同行 PE 75 分位" % len(high),
+                        "detail": "%s 成本 %.2f 元，同行 PE 的 75 分位对应 %.2f 元"
+                                  "（%s，%d 只同业）。成本站在同行估值的高位，"
+                                  "回本更依赖盈利兑现或估值继续扩张；这是相对估值位置，不是卖出信号。"
+                                  % (p.get("name") or p.get("code"),
+                                     float(p.get("cost") or 0), q75,
+                                     v.get("industry") or "未分类",
+                                     int(v.get("peers") or 0))})
+
+    # 计划-执行偏差
+    if dev and not dev.get("empty") and (dev.get("total_amt") or 0) > 0:
+        ratio = float(dev.get("extra_ratio") or 0)
+        if ratio >= 40:
+            names = [x.get("name") or x.get("code") for x in
+                     (dev.get("extra_buy") or []) + (dev.get("extra_sell") or [])][:3]
+            out.append({"level": "warn",
+                        "title": "计划外成交占 %.0f%%" % ratio,
+                        "detail": "最近一份目标持仓（%s）之后成交 %.0f 元，其中 %.0f 元不在计划里"
+                                  "（%s）。计划的价值是让临时起意可见；占比高说明计划只是事后记录。"
+                                  % (dev.get("since") or "—", dev.get("total_amt") or 0,
+                                     dev.get("extra_amt") or 0, "、".join(names) or "多笔")})
+        miss = int(dev.get("planned_sell") or 0) - int(dev.get("done_sell") or 0)
+        if miss > 0:
+            out.append({"level": "warn",
+                        "title": "计划卖出 %d 只，实际只卖了 %d 只"
+                                 % (int(dev.get("planned_sell") or 0),
+                                    int(dev.get("done_sell") or 0)),
+                        "detail": "差额可能是分批执行、也可能是不愿认错。"
+                                  "如果是有意保留，把理由写进日记；否则这部分就是计划失效的地方。"})
 
     # 追高：买入价 vs 当日区间
     chase = [c for c in (trades.get("closed_list") or []) if (c.get("pnl") or 0) < 0 and c.get("days", 0) <= 3]
@@ -720,7 +949,7 @@ def _vs_picks(pos: dict, batches: int = 9) -> dict:
             miss.append(item)
 
     # 候选自记录日到最新收盘的涨幅。
-    # 口径必须一致：picks.csv 里的 close 是**后复权**收盘（建快照时写进去的），
+    # 口径必须一致：picks 表的 close 是**后复权**收盘（建快照时写进去的），
     # 所以这里也用 histcache 的后复权序列，绝不能拿它跟账户持仓的**真实成交价**比 ——
     # 那样会算出「宁德时代 465 → 180，跌 61%」这种纯属除权造成的假跌幅。
     perf, avg = [], None
@@ -788,6 +1017,7 @@ def board(days: int = 180, rate: dict | None = None) -> dict:
                         "若只想看成交与胜率，直接「拉取历史」也能出结果（没有资金曲线）。",
                 "curve": _curve([], fl), "positions": {"items": [], "count": 0, "industry": []},
                 "attribution": {"items": [], "day_pnl": 0}, "trades": {}, "diagnose": [],
+                "risk": {}, "risk_trend": [], "plan_dev": {},
                 "cashflow": _cashflow(fl), "order_quality": _order_quality(ords),
                 "vs_picks": {"ok": True, "empty": True, "note": "等待账本"},
                 "journal": "", "days": 0}
@@ -811,7 +1041,43 @@ def board(days: int = 180, rate: dict | None = None) -> dict:
     cash = _cashflow(fl)
     oq = _order_quality(ords)
     attr = _attribution(latest, pos, led, rate)
-    diag = _diagnose(latest, pos, trades, curve, has_equity, cash, oq)
+    risk = {}
+    if pos.get("items"):
+        try:
+            import riskview
+            risk = riskview.batch([p["code"] for p in pos["items"]])
+        except Exception:
+            risk = {}
+    try:
+        import portfolio
+        pc = portfolio.cfg()
+    except Exception:
+        pc = {}
+    rsum = _risk_summary(pos, risk, pc)
+    dev = _plan_deviation(led)
+    diag = _diagnose(latest, pos, trades, curve, has_equity, cash, oq,
+                     risk=risk, dev=dev)
+    trend = []
+    try:
+        import store
+        if has_equity and rsum.get("items"):
+            top = rsum["items"][0]
+            exp = ov.get("exposure")
+            if exp is None:
+                tot = _r(ov.get("total"))
+                exp = _r((_r(ov.get("mv")) or 0) / tot * 100) if tot else None
+            store.risk_daily_put({
+                "date": latest.get("date") or "",
+                "total": rsum.get("total"), "budget": rsum.get("risk_pct"),
+                "usage": rsum.get("usage"),
+                "top_code": top.get("code"), "top_name": top.get("name"),
+                "top_risk": top.get("risk_pct"),
+                "exposure": _r(exp),
+                "n_pos": pos.get("count") or len(pos.get("items") or []),
+            })
+        trend = store.risk_daily_list(30)
+    except Exception:
+        trend = []
 
     return {
         "ok": True, "empty": False,
@@ -832,6 +1098,9 @@ def board(days: int = 180, rate: dict | None = None) -> dict:
         "cashflow": cash,
         "order_quality": oq,
         "diagnose": diag,
+        "risk": rsum,
+        "risk_trend": trend,
+        "plan_dev": dev,
         "vs_picks": _vs_picks(pos),
         "journal": latest.get("journal") or "",
         "fee_rate": rate,

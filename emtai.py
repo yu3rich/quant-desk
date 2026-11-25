@@ -175,7 +175,6 @@ def local_journal(board: dict) -> str:
     tr = board.get("trades") or {}
     curve = board.get("curve") or {}
     attr = board.get("attribution") or {}
-    day = board.get("date") or ""
     total = _n(o.get("total"))
     day_pnl = _n(o.get("day_pnl"))
     prev_total = (total - day_pnl) if (total is not None and day_pnl is not None) else None
@@ -185,37 +184,37 @@ def local_journal(board: dict) -> str:
         exposure = _pct_of(o.get("mv"), total)
     cash_pct = _pct_of(o.get("avail") or o.get("cash"), total)
 
-    lines = []
-    lines.append("【今日事实】%s 总资产 %s 元，当日盈亏 %s 元（%s），仓位 %s%%，可用资金占比 %s%%。"
-                 % (day or "最近交易日", _money(total), _sign(day_pnl),
-                    _sign(day_pct, 2, "%"), _num(exposure, 1), _num(cash_pct, 1)))
+    lines = ["## 今日事实"]
+    lines.append("- 总资产 **%s** 元，当日盈亏 **%s** 元（%s），仓位 **%s%%**，可用资金占比 **%s%%**。"
+                 % (_money(total), _sign(day_pnl), _sign(day_pct, 2, "%"),
+                    _num(exposure, 1), _num(cash_pct, 1)))
 
     items = sorted(pos.get("items") or [], key=lambda p: -(p.get("mv") or 0))
     if not items:
-        lines.append("【持仓】账本最后一个交易日为空仓（或没有资金快照）。")
+        lines.append("- 持仓：账本最后一个交易日为空仓（或没有资金快照）。")
     else:
         top = []
         for p in items[:3]:
             top.append("%s(%s) 占 %s%%、浮盈 %s 元" % (
                 p.get("name") or p.get("code"), p.get("code"),
                 _num(p.get("mv_share"), 1), _sign(p.get("pnl"))))
-        lines.append("【持仓】共 %d 只，前三大合计 %s%%、有效分散度 %s 只；%s。" % (
+        lines.append("- 持仓：共 %d 只，前三大合计 %s%%，有效分散度 %s 只；%s。" % (
             pos.get("count") or len(items), _num(pos.get("top3"), 1),
             _num(pos.get("eff_n"), 2), "；".join(top)))
 
     closed = int(tr.get("closed") or 0)
     if closed:
-        lines.append("【交易】区间已平仓 %d 笔，胜率 %s%%，盈亏比 %s，平均持有 %s 天；"
+        lines.append("- 交易：区间已平仓 %d 笔，胜率 %s%%，盈亏比 %s，平均持有 %s 天；"
                      "估算费用 %s 元，已平仓费用占毛利 %s%%。" % (
                          closed, _num(tr.get("win_rate"), 1), _num(tr.get("pl_ratio"), 2),
                          _num(tr.get("avg_hold_days"), 1), _num(tr.get("fee")),
                          _num(abs((tr.get("closed_fee") or 0) / tr["gross"] * 100), 1)
                          if tr.get("gross") else "—"))
     else:
-        lines.append("【交易】区间内没有可配对的已平仓交易，胜率与盈亏比暂不成立。")
+        lines.append("- 交易：区间内没有可配对的已平仓交易，胜率与盈亏比暂不成立。")
 
     if attr.get("top_gain") or attr.get("top_loss"):
-        lines.append("【当日归因】持仓贡献 %s 元；最大正贡献 %s，最大负贡献 %s。" % (
+        lines.append("- 归因：持仓贡献 %s 元；最大正贡献 %s，最大负贡献 %s。" % (
             _sign(attr.get("held")),
             ("%s %s 元" % (attr["top_gain"].get("name"), _sign(attr["top_gain"].get("day_pnl"))))
             if attr.get("top_gain") else "—",
@@ -223,36 +222,86 @@ def local_journal(board: dict) -> str:
             if attr.get("top_loss") else "—"))
 
     hits = [x for x in (board.get("diagnose") or []) if (x.get("level") or "") != "ok"]
+    lines += ["", "## 过程复盘"]
     if hits:
-        lines.append("【规则命中】" + "；".join(
+        lines.append("- 规则命中：" + "；".join(
             "%s（%s）" % (x.get("title") or "", "注意" if x.get("level") == "risk" else "提示")
             for x in hits[:4]) + "。")
     else:
-        lines.append("【规则命中】本地体检没有触发风险或提示级规则。")
+        lines.append("- 规则命中：本地体检没有触发风险或提示级规则。")
+
+    rk = board.get("risk") or {}
+    if rk.get("items"):
+        x = rk["items"][0]
+        lines.append("- 风险预算：单票波动风险最高 **%s**（%s，权重 %s × ATR %s × %s 倍），"
+                     "组合合计 %s，占单笔预算 %s；设定预算 %s/笔。" % (
+                         _num(x.get("risk_pct"), 2, "%"), x.get("name") or "",
+                         _num(x.get("mv_share"), 1, "%"), _num(x.get("atr_pct"), 2, "%"),
+                         _num(rk.get("atr_mult"), 1), _num(rk.get("total"), 2, "%"),
+                         _num(rk.get("usage"), 0, "%"), _num(rk.get("risk_pct"), 2, "%")))
+    if rk.get("below_ref"):
+        b = rk["below_ref"][0]
+        more = ("等 %d 只" % len(rk["below_ref"])) if len(rk["below_ref"]) > 1 else ""
+        lines.append("- 参考位：%s 已跌破 2×ATR 参考位（成本 %s / 现价 %s / 参考位 %s）%s。" % (
+            b.get("name") or b.get("code"), _num(b.get("cost")), _num(b.get("price")),
+            _num(b.get("ref")), more))
 
     v = board.get("vs_picks") or {}
     if v.get("ok") and not v.get("empty"):
-        lines.append("【与选股对照】最近 %s 批中，最新 Top%s 命中持仓 %s 只（%s%%）；"
+        lines.append("- 与选股对照：最近 %s 批中，最新 Top%s 命中持仓 %s 只（%s%%）；"
                      "持仓候选平均 %s，全部候选平均 %s。" % (
                          v.get("batches"), v.get("top_n"), len(v.get("hit") or []),
                          _num(v.get("hit_rate"), 0), _sign(v.get("held_perf_avg"), 2, "%"),
                          _sign(v.get("pick_ret_avg"), 2, "%")))
 
+    lines += ["", "## 需要警惕"]
+    risks = [x for x in (board.get("diagnose") or []) if (x.get("level") or "") == "risk"]
+    if risks:
+        for x in risks[:3]:
+            seg = "**%s**" % (x.get("title") or "风险项")
+            if x.get("detail"):
+                seg += "：" + str(x["detail"]).rstrip("。") + "。"
+            lines.append("- " + seg)
+    else:
+        lines.append("- 本地规则未触发风险级命中；提示项见上节，仍需留意集中度与摩擦成本。")
+
     checks = []
+    # 具体到个股的检查项优先：跌破参考位、计划外成交，比「规则命中」更能指导第二天动手
+    for b in (rk.get("below_ref") or [])[:2]:
+        checks.append("核对 %s 已跌破 2×ATR 参考位（成本 %s / 现价 %s / 参考位 %s）的持有理由"
+                      % (b.get("name") or b.get("code"), _num(b.get("cost")),
+                         _num(b.get("price")), _num(b.get("ref"))))
+    dv = board.get("plan_dev") or {}
+    if dv and not dv.get("empty") and (dv.get("extra_ratio") or 0) >= 40:
+        checks.append("复盘计划外成交（占 %.0f%%）那几笔当时的理由" % (dv.get("extra_ratio") or 0))
     for x in hits[:3]:
         checks.append(_check_for(x.get("title") or "规则命中"))
     if curve.get("mdd") is not None and (curve.get("mdd") or 0) < -5:
         checks.append("核对区间最大回撤 %s%% 对应的那几天做了什么" % _num(curve.get("mdd"), 2))
     if not checks:
         checks.append("继续记录每笔买入理由与卖出触发条件")
-    lines.append("【明日检查】" + "；".join(checks) + "。")
-    lines.append("（本地规则模板，只复述账本事实与规则命中，不含买卖判断。）")
-    return "\n".join(lines)[:2000]
+    lines += ["", "## 明日检查"]
+    for c in checks[:3]:
+        lines.append("- " + str(c).rstrip("。"))
+    lines += ["", "> 本地规则模板，只复述账本事实与规则命中，不含买卖判断。"]
+    return "\n".join(lines)[:2400]
 
 
 # --------------------------------------------------------------------------
 # 给模型的紧凑上下文
 # --------------------------------------------------------------------------
+
+def _digest_plan(d: dict) -> dict:
+    """计划-执行偏差只发计数与占比，不发逐笔成交明细。"""
+    if not d or d.get("empty"):
+        return {}
+    return {"since": d.get("since"), "fills": d.get("fills"),
+            "planned_buy": d.get("planned_buy"), "planned_sell": d.get("planned_sell"),
+            "done_buy": d.get("done_buy"), "done_sell": d.get("done_sell"),
+            "extra_ratio": d.get("extra_ratio"), "extra_amt": d.get("extra_amt"),
+            "extra": [x.get("name") or x.get("code")
+                      for x in (d.get("extra_buy") or []) + (d.get("extra_sell") or [])][:5]}
+
 
 def _digest(board: dict) -> dict:
     """只带复盘需要的聚合字段，避免把整个账本和流水明细发出去。"""
@@ -370,6 +419,21 @@ def _digest(board: dict) -> dict:
             "slippage": _n(oq.get("slippage")), "slippage_n": oq.get("slippage_n"),
         },
         "rule_hits": flags,
+        "risk_budget": {
+            "per_trade_pct": _n((board.get("risk") or {}).get("risk_pct")),
+            "atr_mult": _n((board.get("risk") or {}).get("atr_mult")),
+            "total_pct": _n((board.get("risk") or {}).get("total")),
+            "usage_pct": _n((board.get("risk") or {}).get("usage")),
+            "over_budget": (board.get("risk") or {}).get("over"),
+            "items": [{"name": x.get("name"), "mv_share": _n(x.get("mv_share")),
+                       "atr_pct": _n(x.get("atr_pct")), "risk_pct": _n(x.get("risk_pct"))}
+                      for x in ((board.get("risk") or {}).get("items") or [])[:5]],
+            "below_ref": [{"name": x.get("name"), "cost": _n(x.get("cost")),
+                           "price": _n(x.get("price")), "ref": _n(x.get("ref")),
+                           "below_pct": _n(x.get("below_pct"))}
+                          for x in ((board.get("risk") or {}).get("below_ref") or [])[:5]],
+        },
+        "plan_deviation": _digest_plan(board.get("plan_dev") or {}),
         "vs_picks": {
             "batches": v.get("batches"), "top_n": v.get("top_n"),
             "hit_rate": _n(v.get("hit_rate"), 0),
@@ -393,15 +457,21 @@ SYSTEM_JOURNAL = """你是 A 股个人投资者的复盘教练，只依据用户
 - 区分过程与结果：盈利不等于决策正确，亏损也不等于错误。只评价能观察到的行为：集中度、换手、持有期、规则命中、记录完整度。
 - 不预测涨跌，不推荐买入卖出，不给目标价、仓位比例、止损止盈数字。
 - 不美化也不训斥；不做心理诊断、人格评价或情绪推断。
+- 风险预算：单票波动风险 = 权重 × ATR% × 倍数，用来解释「同样的仓位在高波动票上占多少风险」，不是止损或减仓建议。
+- 参考位：2×ATR 参考位只说明「现价已偏离建仓时的常态波动」，跌破不等于该卖；只能提示核对持有理由。
+- 计划偏差：plan_deviation 里的 extra_ratio 是「计划外成交金额占比」，只能用来指出计划与执行的差距，不要据此判断交易好坏。
 - 数据不足时直接承认，不要用常识补齐。
 
-【输出】
-只输出正文，分四节，标题固定为：
-今日事实
-过程复盘
-需要警惕
-明日检查
-每节 1-3 句，全文 300-550 字。不要开头客套，不要 Markdown 代码块，不要输出 JSON。"""
+【输出格式】
+只输出正文，用标准 Markdown 组织，四节标题固定（二级标题，`##` 后留一个空格）：
+## 今日事实
+## 过程复盘
+## 需要警惕
+## 明日检查
+- 每节 1-3 句；关键数字用 `**加粗**` 突出（每节最多 3 处，不要整段加粗）。
+- 需要并列陈述时用 `- ` 无序列表，每节最多 3 条；单个结论就写成一段。
+- 不要一级标题、不要代码块、不要输出 JSON、不要加分隔线或表格。
+全文 300-550 字。不要开头客套。"""
 
 SYSTEM_HEALTH = """你是 A 股个人投资者的交易行为体检助手。只根据账本聚合数据与已有规则命中，输出结构化体检。
 
@@ -411,6 +481,9 @@ SYSTEM_HEALTH = """你是 A 股个人投资者的交易行为体检助手。只�
 
 【体检纪律】
 - 评价行为与纪律（集中度、现金缓冲、换手、持有期、盈亏结构、委托质量），不评价你今天赚没赚钱。
+- 风险预算（权重 × ATR% × 倍数）可用来解释「同样的仓位为什么风险不同」，但不要据此给仓位或止损建议。
+- 持仓成本高于同行 PE 75 分位、跌破 2×ATR 参考位，都只作事实陈述（「成本站在同行估值高位」），不构成卖出理由。
+- 计划外成交占比（plan_deviation.extra_ratio）用于指出计划对执行是否有约束力，不评价单笔交易对错。
 - 不预测涨跌，不推荐买入卖出，不给目标价、仓位比例、止损止盈数字。
 - 不贴“贪婪/恐惧/追涨杀跌”等人格标签，不做心理诊断，不训斥；只描述可观察的行为。
 - 已有规则命中可以作为线索，但要用数据解释它意味着什么，不要原样复述。
@@ -507,7 +580,33 @@ def _can_replace(meta: dict, force: bool) -> bool:
                 or meta.get("journal_src") in ("ai", "local"))
 
 
+def _mirror_md(day: str, text: str, src: str, model: str = "") -> bool:
+    """把生成的日记同步进复盘日记页的 .md（一天一篇）。
+
+    复盘日记已独立成页，账本里的 journal 字段只作后端兼容；不镜像的话，
+    收盘自动生成的内容在页面上看不到，等于白跑一次模型。
+    手写稿优先：日记页那天是手写，就不覆盖。
+    """
+    try:
+        import journal
+        cur = journal.read(day) or {}
+        if str(cur.get("src") or "") == "manual" and src != "manual":
+            return False
+        return bool((journal.save(day, text, src=src, model=model) or {}).get("ok"))
+    except Exception:
+        return False
+
+
 def _local_result(kind: str, board: dict, warning: str) -> dict:
+    # 回退是「正常可用」还是「模型坏了」，用户从界面上分不出来；日志里要能看出频率。
+    # 「未启用」属于配置选择，不算异常，用 info；其余（端点不通、返回空、解析失败）用 warn。
+    try:
+        import store
+        soft = "未启用" in warning or "未配置" in warning
+        store.log("emtai", "%s 回退本地：%s" % ("日记" if kind == "journal" else "体检", warning[:160]),
+                  level=("info" if soft else "warn"), act=kind, detail=warning[:800])
+    except Exception:
+        pass
     if kind == "journal":
         return {"ok": True, "kind": "journal", "mode": "local", "fallback": True,
                 "text": local_journal(board), "saved": False, "warning": warning,
@@ -560,6 +659,7 @@ def generate(kind: str, board: dict | None = None, day: str = "",
                 saved = False
                 if text and can:
                     emtlink.journal_set(day, text, src="local")
+                    _mirror_md(day, text, "local")
                     saved = True
                 return {"ok": True, "kind": kind, "mode": "local", "text": text,
                         "saved": saved, "conflict": not can, "day": day,
@@ -579,6 +679,7 @@ def generate(kind: str, board: dict | None = None, day: str = "",
                 can = _can_replace(meta, force)
                 if r.get("text") and can:
                     emtlink.journal_set(day, r["text"], src="local")
+                    _mirror_md(day, r["text"], "local")
                     r["saved"] = True
                 return r
 
@@ -597,6 +698,7 @@ def generate(kind: str, board: dict | None = None, day: str = "",
             can = _can_replace(meta, force)
             if can:
                 emtlink.journal_set(day, text, src="ai", model=r.get("model") or "")
+                _mirror_md(day, text, "ai", r.get("model") or "")
                 emtlink.day_merge(day, {"journal_model": r.get("model") or ""})
             return {"ok": True, "kind": kind, "mode": "ai", "text": text,
                     "saved": bool(can), "day": day, "model": r.get("model") or "",

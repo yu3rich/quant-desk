@@ -21,9 +21,11 @@ emtl 是什么
 
 数据沉淀（三层）
 ----------------
-1. `data/ledger/YYYY-MM-DD.json`  每日快照：总资产、持仓成本、当日委托。成本价只有快照能给。
-2. `data/ledger/fills.csv`        历史成交明细（`query_history_trades` 回流），FIFO 的唯一权威来源。
-3. `data/ledger/flows.csv`        资金流水（`query_funds_flow` 回流），用于净入金与真实费用。
+1. `ledger_days` 表（SQLite）     每日快照：总资产、持仓成本、当日委托。成本价只有快照能给。
+2. `fills` 表（SQLite）           历史成交明细（`query_history_trades` 回流），FIFO 的唯一权威来源。
+3. `flows` 表（SQLite）           资金流水（`query_funds_flow` 回流），用于净入金与真实费用。
+
+`data/ledger/` 下的旧 JSON/CSV 只在首次迁移时读取一次，迁移标志落库后不再碰。
 
 三者互不覆盖：快照回答「当时是什么样」，成交回答「做了什么」，流水回答「钱怎么进出」。
 
@@ -623,11 +625,18 @@ _LEDGER_DB_READY = False
 
 
 def _ensure_ledger_db():
-    """把旧 data/ledger/*.json 与三份 CSV 迁进库；键用本模块的去重函数算。"""
+    """把旧 data/ledger/*.json 与三份 CSV 一次性迁进库；键用本模块的去重函数算。
+
+    迁移完成后旧文件不再读：`migrate_ledger` 里的 flag 判断在文件扫描之后，
+    必须在扫描之前先查，否则每次进程首次访问账本都会白扫一遍旧 JSON/CSV。
+    """
     global _LEDGER_DB_READY
     if _LEDGER_DB_READY:
         return
     import store
+    if store.migration_done("ledger_migrated"):
+        _LEDGER_DB_READY = True
+        return
     days = []
     if LEDGER.exists():
         for p in sorted(LEDGER.glob("*.json")):
@@ -744,6 +753,15 @@ def _mark(ok: bool, msg: str) -> None:
         c["last_msg"] = str(msg)[:300]
         try:
             CFG_PATH.write_text(json.dumps(c, ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception:
+            pass
+    # 成功不记：盘中每 5 分钟同步一次，全记会把日志刷满；失败必须留痕，
+    # 「今天曲线缺一段」往往就是某次登录失败被静默吞了。
+    if not ok:
+        try:
+            import store
+            store.log("emt", "账户同步失败：%s" % str(msg)[:180], level="error",
+                      act="sync", detail=str(msg)[:1500])
         except Exception:
             pass
 
@@ -970,6 +988,39 @@ def hist_state() -> dict:
 # 状态
 # --------------------------------------------------------------------------
 
+def _eod_state(c: dict, now: dt.datetime) -> dict:
+    """今天该日结、但账本里还没有这一天。
+
+    实盘这条链路最容易「静默过期」：电脑晚上没开，15:35 的自动日结就不发生，
+    账本少一天，页面上只是曲线短一截，没有任何提示。而资产快照只能取当下，
+    漏掉的日子补不回来 —— 所以提示的落点只能是「现在补上今天」，不是历史缺口。
+    只在「已配置 + 交易日 + 过了日结时刻」判断，盘中不喊。
+    """
+    if not (c.get("user") and c.get("pass_enc")):
+        return {}
+    day = now.strftime("%Y-%m-%d")
+    hm = str(c.get("auto_time") or "15:35").replace(":", "")
+    if not (len(hm) == 4 and now.strftime("%H%M") >= hm):
+        return {}
+    try:
+        import pipeline
+        if pipeline._is_trading_day(day) is False:
+            return {}
+    except Exception:
+        if now.weekday() >= 5:
+            return {}
+    try:
+        days = ledger_days()
+    except Exception:
+        return {}
+    last = max(days) if days else ""
+    if day in days:
+        return {"pending": False, "last": last}
+    return {"pending": True, "day": day,
+            "last": last,
+            "note": "今天还没日结同步" + ("（账本最新 %s）" % last if last else "")}
+
+
 def status() -> dict:
     c = load_cfg()
     import time
@@ -999,6 +1050,7 @@ def status() -> dict:
         "last_ok": c.get("last_ok"),
         "last_msg": c.get("last_msg") or "",
         "ledger_days": len(ledger_days()),
+        "eod": _eod_state(c, now),
         "lib": _lib_ver(),
         "history": hist_state(),
     }
@@ -1176,6 +1228,14 @@ def _auto_due(cfg: dict, now: dt.datetime) -> tuple[bool, str]:
         return False, "未配置账号"
     if now.isoweekday() > 5:
         return False, "周末不取数"
+    # 只看星期不够：国庆/春节这类工作日休市日会空跑一次日结，生成一份空复盘
+    # 还把 eod_try 标记成当天。交易日历不可用（返回 None）时不拦，宁可多跑一次。
+    try:
+        import pipeline
+        if pipeline._is_trading_day(now.strftime("%Y-%m-%d")) is False:
+            return False, "今天不是交易日"
+    except Exception:
+        pass
     hm = str(cfg.get("auto_time") or "15:35")
     try:
         h, m = [int(x) for x in hm.split(":")[:2]]

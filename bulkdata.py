@@ -33,7 +33,6 @@ import pandas as pd
 
 BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
-CACHE = DATA / "cache"          # 旧 CSV 缓存目录，仅作 store.py 首次迁移来源
 CONFIG = BASE / "config.json"
 UNIVERSE = DATA / "universe.csv"
 # 最近一次行情任务用的数据源（降级/限流提示要跨进程重启保留）
@@ -99,6 +98,56 @@ def to_bs_code(code: str) -> str | None:
     k = market_kind(code)
     c = str(code).zfill(6)
     return f"{k}.{c}" if k in ("sh", "sz") else None
+
+
+# --------------------------------------------------------------------------
+# 「离线兜底」识别
+# --------------------------------------------------------------------------
+# quant.fetch_history() 在三条取数通道（akshare / 东财直连 / 腾讯）全失败时，
+# 会退回本地旧缓存，并返回 source="本地缓存（离线）"。它的返回值和正常成功
+# 完全一致，只有这个字符串能区分。
+#
+# 为什么必须单独判：把旧数据当成功写回 bar_meta，updated 会变成今天、last_date
+# 原地不动 —— 覆盖率永远补不齐、待办一直挂着，而运行记录里显示「成功」。
+# 「没拿到新数据」不等于「更新成功」，这里如实报失败，让它进重试与快照补数的队列。
+OFFLINE_SRC = "本地缓存（离线）"
+# 离线兜底记为 fail（会被重试，并进 _FAILED 交给快照补当日 K 线）；
+# 不用 "skip"，因为 skip 不重试 —— 而这类票恰恰是最需要重试的。
+OFFLINE_ST = "fail"
+
+
+def is_offline_source(src) -> bool:
+    """这条数据是不是「取数全失败、退回本地旧缓存」拿到的。"""
+    return OFFLINE_SRC in str(src or "")
+
+
+def _last_day_of(d) -> str:
+    """DataFrame 末根 K 线的日期，用于在报错里说清「停在几号」。"""
+    try:
+        if d is None or len(d) == 0:
+            return "—"
+        return str(d["date"].iloc[-1])[:10]
+    except Exception:
+        return "—"
+
+
+def _target_day(today: str) -> str:
+    """这批增量「应该跟到」的交易日。
+
+    baostock 的日线大约 17:30 才入库，东财/腾讯快照则收盘（15:05）后才有定盘数据；
+    所以盘中跑增量时，「今天」并不是这批数据的目标 —— 目标是有数据的那个最近交易日。
+    pipeline._expected_day() 已经把「交易所日历 + 源站入库时刻」这套口径算过了，
+    这里直接复用，避免两处各写一套「今天算不算新」（这正是 README 里点名的坑）。
+    取不到就退回 today，宁可严格一点也不放松。
+    """
+    try:
+        import pipeline
+        exp = str(pipeline._expected_day() or "")[:10]
+        if exp:
+            return min(exp, today)
+    except Exception:
+        pass
+    return today
 
 
 def _today() -> str:
@@ -255,12 +304,30 @@ def _process_hs(bs, code: str, mode: str, cache_start: str, end: str):
 
 
 def _process_bj(code: str):
-    """北交所：baostock 无覆盖，走腾讯通道（qfq），全量下载。"""
+    """北交所：baostock 无覆盖，走腾讯通道（qfq），全量下载。
+
+    腾讯/东财的日线在盘中会带上「今天」那根还没收盘的 bar。以前只在收盘后跑
+    增量，碰不到这事；现在漏跑补跑可能发生在盘中（比如上午打开工作台补昨天的），
+    那根半截 bar 会让北交所整批股票的数据日比基准日新一天，横截面里被全部剔除。
+    收盘（15:05）之前一律剔除当日 bar，等收盘后再由下一次全量写回完整的一天。
+    """
     try:
         import quant
         d, src = quant.fetch_history(code)
         if d is None or len(d) <= 20:
             return "fail", 0, "北交所无数据"
+        # fetch_history 在「三条取数通道全失败」时会退回本地旧缓存，但返回值和
+        # 正常成功完全一样，只靠 source 区分。若把旧数据当成功写回：
+        # bar_meta.updated 变成今天、last_date 原地不动，覆盖率永远补不齐，
+        # 界面上还会显示「更新成功」。这种「没拿到新数据」必须如实报失败。
+        if is_offline_source(src):
+            return OFFLINE_ST, 0, "取数失败，仅回退本地旧缓存（%s）" % _last_day_of(d)
+        ok_win, _why = spot_window()
+        if not ok_win and "date" in d.columns:
+            today = dt.date.today().isoformat()
+            d = d[d["date"].astype(str).str.slice(0, 10) < today]
+            if d is None or len(d) <= 20:
+                return "fail", 0, "盘中数据已剔除，历史日线不足 20 根"
         _write(code, d, src or "腾讯行情", "qfq")
         return "ok", len(d), ""
     except Exception as e:
@@ -658,7 +725,15 @@ def _run_parallel(codes: list[str], mode: str, cache_start: str, end: str, worke
                 [sys.executable, str(Path(__file__).resolve()), "--worker",
                  str(p), mode, cache_start, end],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, encoding="utf-8", errors="ignore", bufsize=1)
+                text=True, encoding="utf-8", errors="ignore", bufsize=1,
+                # 子进程 stdout 是管道，Windows 上 Python 不会自动用 UTF-8，
+                # 而是回落到 ANSI 代码页（简体中文机器是 cp936/GBK）。
+                # 父进程按 UTF-8 解码时，GBK 汉字里像 C8A1（「取」）这类双字节
+                # 恰好也是合法的 UTF-8 序列 —— errors="ignore" 拦不住，
+                # 会静默变成「ȡʧ」这种乱码，把真实的报错原因吃掉。
+                # 显式把子进程的 stdio 编码钉死成 UTF-8。
+                env={**os.environ, "PYTHONIOENCODING": "utf-8",
+                     "PYTHONUTF8": "1"})
             procs.append(pr)
             chunk_of[id(pr)] = chunk
             seen_of[id(pr)] = set()
@@ -839,10 +914,15 @@ def _run(codes: list[str], mode: str, workers: int = 1):
                 else:
                     # 行情补到了昨天、今天这根没补上，别把失败藏起来
                     _STATE["topup"] = {"day": "", "updated": 0, "error": r.get("error")}
-        # 对账：报过失败的代码，只要缓存里已经有今天的 K 线，就不该继续算失败 ——
+        # 对账：报过失败的代码，只要缓存里已经跟到了目标日，就不该继续算失败 ——
         # 用户关心的是「数据到底新不新」，而不是某个子进程的登录成功与否。
+        #
+        # 目标日不能取 today：baostock 大约 17:30 才入库当天日线，盘中（甚至收盘后
+        # 没过 17:30）跑增量时每一只都「缺今天」，missing 是全集 → 一只都修不掉，
+        # 对账等于空转。要跟的是「应到交易日」，那才是这批数据该到的位置。
+        cur_day = _target_day(today)
         if not _STATE["stop"] and _STATE["fail"]:
-            miss = set(_codes_missing(codes, today))
+            miss = set(_codes_missing(codes, cur_day))
             fixed = [c for c in list(_FAILED) if c not in miss]
             for c in fixed:
                 _FAILED.remove(c)
@@ -860,24 +940,51 @@ def _run(codes: list[str], mode: str, workers: int = 1):
     if _STATE.get("_log", True):
         try:
             import store
-            okf = not _STATE.get("error") and not _STATE.get("stop")
+            # 「跑完了」不等于「更新成功了」：以前只看 error/stop，935 只失败也记成
+            # 绿色成功，于是更新记录说「成功」、待办却还挂着 —— 两边互相打脸。
+            # 有失败只数就记失败，并在 error 里写清有多少只没跟上。
+            nfail = int(_STATE.get("fail") or 0)
+            okf = (not _STATE.get("error") and not _STATE.get("stop")
+                   and nfail == 0 and int(_STATE.get("ok") or 0) > 0)
             ms = int((time.time() - float(_STATE.get("started_at") or time.time())) * 1000)
             detail = str(_STATE.get("message") or "")[:200]
+            if nfail:
+                detail = ("%s · 失败 %d 只 · 成功 %d 只 · 跳过 %d 只"
+                          % (detail, nfail, int(_STATE.get("ok") or 0),
+                             int(_STATE.get("skip") or 0)))[:200]
+            err = str(_STATE.get("error") or "")[:300]
+            if not err and nfail:
+                err = "行情更新未全部成功：%d 只失败（详见运行日志的失败原因）" % nfail
             store.run_log("quote", okf,
                           steps=[{"name": "增量行情", "ok": okf, "ms": ms, "detail": detail}],
-                          trigger="shortcut", error=str(_STATE.get("error") or "")[:300], ms=ms)
+                          trigger="shortcut", error=err, ms=ms)
         except Exception:
             pass
 
 
+_START_LOCK = threading.Lock()
+
+
 def start(mode: str = "incremental", limit: int | None = None, scope: str = "all",
           workers: int | None = None, log: bool = True) -> dict:
-    if _STATE["running"]:
-        s = status()
-        s["ok"] = False
-        s["error"] = "已有下载任务正在运行（%d/%d），先停止或等它跑完" % (
-            _STATE["done"], _STATE["total"])
-        return s
+    # 检查与置位必须在同一把锁里：以前 running 是子线程 _prep() 才置 True，
+    # 两个请求在它置位前都能通过检查，于是并发跑两份、子进程数翻倍。
+    with _START_LOCK:
+        if _STATE["running"]:
+            s = status()
+            s["ok"] = False
+            s["error"] = "已有下载任务正在运行（%d/%d），先停止或等它跑完" % (
+                _STATE["done"], _STATE["total"])
+            return s
+        _STATE.update(running=True, stop=False, done=0, error="", message="准备中…")
+    try:
+        return _start_locked(mode, limit, scope, workers, log)
+    except Exception:
+        _STATE.update(running=False, message="")
+        raise
+
+
+def _start_locked(mode: str, limit, scope: str, workers, log: bool) -> dict:
     codes = _codes(scope)
     if limit:
         # 限量时优先处理「未缓存」和「最久未更新」的股票，保证每次限量都能扩大覆盖
@@ -889,6 +996,7 @@ def start(mode: str = "incremental", limit: int | None = None, scope: str = "all
             return (0, "") if not m else (1, m.get("last_date", ""))
         codes = sorted(codes, key=_prio)[:int(limit)]
     if not codes:
+        _STATE.update(running=False, message="")
         s = status()
         s["ok"] = False
         s["error"] = "没有需要处理的股票（名单为空或已全部缓存）"
@@ -897,7 +1005,12 @@ def start(mode: str = "incremental", limit: int | None = None, scope: str = "all
         workers = int(_cfg().get("bulk_workers", 6) or 6)
     workers = max(1, min(8, int(workers)))
     _STATE["_log"] = bool(log)
-    threading.Thread(target=_run, args=(codes, mode, workers), daemon=True).start()
+    _STATE["total"] = len(codes)
+    try:
+        threading.Thread(target=_run, args=(codes, mode, workers), daemon=True).start()
+    except Exception:
+        _STATE.update(running=False, message="")
+        raise
     return {"ok": True, "started": len(codes), "mode": mode, "scope": scope,
             "workers": workers}
 

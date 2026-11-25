@@ -6,11 +6,13 @@ import datetime as dt
 import json
 import sys
 import time
+import traceback
 from importlib import metadata
 from pathlib import Path
 
 import pandas as pd
 from flask import Flask, Response, jsonify, request, send_from_directory
+from werkzeug.exceptions import HTTPException
 
 import quant
 import watchlist
@@ -31,6 +33,11 @@ import emtbook
 import emtai
 import store
 import journal
+import listing
+import factors
+import portfolio
+import capital
+import stockview
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -96,15 +103,40 @@ def _gzip_json(resp):
     return resp
 
 
+@app.errorhandler(Exception)
+def _on_unhandled(e):
+    """兜底：任何没被接口自己 try 住的异常都进系统日志，并带上堆栈。
+
+    HTTPException（404/405 之类）是正常的路由结果，不记、原样返回。
+    """
+    if isinstance(e, HTTPException):
+        return e
+    try:
+        store.log("app", "未捕获异常 %s %s" % (request.method, request.path),
+                  level="error", act=request.path,
+                  detail=traceback.format_exc()[-2000:])
+    except Exception:
+        pass
+    return jsonify({"ok": False, "error": str(e)}), 500
+
+
 def cfg():
     return quant.load_config()
 
 
 def _latest_bar_day() -> str:
-    """行情缓存里的最新交易日（取几只不会长期停牌的大票里最新的那个）。
+    """行情缓存的数据日：多数股票都到齐的那一天（1 毫秒级）。
 
-    只读文件尾部，0.1 毫秒级；不要用「读一只票的全表」那种做法，没必要。
+    以前只看 4 只大盘股的末根 K 线，它们一旦被快照/单只补抓抢先写进新的一天，
+    就会误判「截面已是最新」，于是拿旧截面打分、界面还显示最新。
     """
+    try:
+        import store
+        d = store.data_day()
+        if d:
+            return d
+    except Exception:
+        pass
     import histcache
     best = ""
     for c in ("600000", "000001", "600519", "000002"):
@@ -119,6 +151,16 @@ def ok(**kw):
 
 
 def fail(e):
+    """接口级错误：回给前端一句话，同时留一条带路径的日志。
+
+    「刚才点了一下就报错」这类问题，如果没有路径和原始异常，事后根本没法定位。
+    """
+    try:
+        store.log("api", "%s %s：%s" % (request.method, request.path, str(e)[:160]),
+                  level="warn", act=request.path,
+                  detail="%s\n%s" % (str(e), traceback.format_exc()[-1200:]))
+    except Exception:
+        pass
     return jsonify({"ok": False, "error": str(e)})
 
 
@@ -137,7 +179,13 @@ def _shortcut(kind: str, name: str, fn, data_day: str = ""):
         okf = bool(d.get("ok", True))
         ms = int((time.time() - t0) * 1000)
         detail = str(d.get("error") or d.get("message") or "")[:200]
-        store.run_log(kind, okf, steps=[{"name": name, "ok": okf, "ms": ms, "detail": detail}],
+        # 「没到点，压根没发请求」和「跑了但失败」不是一回事：记录里要能分开看，
+        # 否则更新记录全是成功，反而看不出估值其实一直没动。
+        skip = bool(d.get("blocked"))
+        if skip:
+            detail = ("跳过：" + detail)[:200]
+        store.run_log(kind, okf, steps=[{"name": name, "ok": okf, "ms": ms,
+                                         "detail": detail, "skip": skip}],
                       trigger="shortcut", data_day=data_day,
                       error=str(d.get("error") or "")[:300], ms=ms)
         return r
@@ -151,7 +199,56 @@ def _shortcut(kind: str, name: str, fn, data_day: str = ""):
 
 @app.route("/")
 def index():
-    return send_from_directory(WEB, "index.html")
+    """首页：把静态资源的版本号替换成本次启动时的指纹。
+
+    为什么必须自动：以前 index.html 里写死 `?v=20261121f`，改完 CSS/JS 忘了改这个
+    字符串，浏览器就一直用旧缓存 —— 表现是「改了半天没变化」，其实是本地缓存没失效。
+    现在版本号由文件 mtime 算出来，改完刷新就生效，不需要手动维护。
+    """
+    try:
+        html = (WEB / "index.html").read_text(encoding="utf-8")
+        stamp = _asset_stamp()
+        # 同时替换 CSS / JS / 图标三类资源的 ?v=
+        import re as _re
+        html = _re.sub(r'(\?v=)[0-9A-Za-z._-]+', r"\g<1>" + stamp, html)
+        resp = Response(html, mimetype="text/html")
+        # 首页本身不缓存，否则里面的新版本号也读不到
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return resp
+    except Exception:
+        return send_from_directory(WEB, "index.html")
+
+
+def _asset_stamp() -> str:
+    """静态资源的版本指纹：取 style.css / app.js / index.html 的最新 mtime。
+
+    只精确到秒不够（同一秒内改两次会撞车），所以带上文件大小一起哈希。
+    """
+    try:
+        import hashlib
+        h = hashlib.md5()
+        for name in ("style.css", "app.js", "index.html", "icon.svg"):
+            p = WEB / name
+            if p.exists():
+                st = p.stat()
+                h.update(("%s:%d:%d;" % (name, int(st.st_mtime), st.st_size)).encode())
+        return h.hexdigest()[:10]
+    except Exception:
+        return "0"
+
+
+@app.after_request
+def _no_cache_static(resp):
+    """静态资源只走协商缓存，不设 max-age。
+
+    版本号本来由 index() 按文件指纹自动替换（URL 变了自然重新拉取），
+    但本地工具只有一个用户：多一次 304 校验几乎没有代价，却能在指纹机制
+    没生效时（例如直接用 file:// 打开、或反向代理改写了 URL）避免拿着旧文件
+    排查半天「为什么改了没反应」。
+    """
+    if request.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return resp
 
 
 @app.route("/static/<path:fn>")
@@ -191,10 +288,12 @@ def backtest():
                 c[k] = b[k]
         d, source = quant.get_quotes(code, start, end,
                                      refresh=bool(b.get("refresh")), cfg=c)
+        sname = quant.stock_name(code, cfg())
         r = quant.run_backtest(d, strategy=str(b.get("strategy", "ma_cross")),
                                params=b.get("params") or {}, cfg=c,
-                               capital=b.get("capital"))
-        r.update(code=code, name=quant.stock_name(code, cfg()),
+                               capital=b.get("capital"),
+                               code=code, name=sname)
+        r.update(code=code, name=sname,
                  source=source, start=start, end=end,
                  date_from=str(d["date"].iloc[0]), date_to=str(d["date"].iloc[-1]),
                  bars=int(len(d)))
@@ -235,10 +334,11 @@ def watchlist_api():
         b = request.get_json(force=True) or {}
         action = str(b.get("action") or "")
         allowed = ("add", "remove", "rename", "default", "move", "clear",
-                   "replace", "remove_source")
+                   "replace", "remove_source", "import")
         if action not in allowed:
             return fail("未知操作：" + action)
-        kw = {k: b[k] for k in ("code", "name", "dir", "items", "source") if k in b}
+        kw = {k: b[k] for k in ("code", "name", "dir", "items", "source",
+                                "text", "mode") if k in b}
         return jsonify(watchlist.mutate(action, **kw))
     except Exception as e:
         return fail(e)
@@ -259,6 +359,54 @@ def watchlist_export():
 def symbol_lookup():
     try:
         return jsonify(watchlist.lookup(request.args.get("q", "")))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/stock/detail")
+def stock_detail():
+    """单股画像：行情 / 估值 / 模型分与排名 / 24 因子有利分位。"""
+    try:
+        return jsonify(stockview.detail(request.args.get("code") or "",
+                                        force=request.args.get("force") == "1"))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/stock/analyze", methods=["POST"])
+def stock_analyze():
+    """生成一份单股分析并存档；LLM 失败会回退本地模板，mode 如实标注。"""
+    try:
+        b = request.get_json(force=True) or {}
+        return jsonify(stockview.analyze(b.get("code") or "", force=bool(b.get("force"))))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/stock/reports")
+def stock_reports():
+    try:
+        return jsonify(stockview.history(request.args.get("code") or "",
+                                        limit=int(request.args.get("limit") or 60)))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/stock/reports/clear", methods=["POST"])
+def stock_reports_clear():
+    try:
+        b = request.get_json(force=True) or {}
+        return jsonify(stockview.clear(b.get("code") or ""))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/stock/reports/<int:rid>", methods=["GET", "DELETE"])
+def stock_report_one(rid):
+    try:
+        if request.method == "DELETE":
+            return jsonify(stockview.delete(rid))
+        return jsonify(stockview.get(rid))
     except Exception as e:
         return fail(e)
 
@@ -359,6 +507,12 @@ def universe_apply():
 
 @app.route("/api/universe/prewarm", methods=["GET", "POST"])
 def universe_prewarm():
+    """全 A 行情预热（后台限量补缓存）。
+
+    目前前端没有入口：预热能力与「股票池 → 刷新行情」的 bulkdata 重叠，
+    保留接口是为了脚本化调用（curl / 定时任务）。若要接回页面，
+    在数据中枢「数据链」的名单段加一个按钮即可。
+    """
     try:
         if request.method == "POST":
             b = request.get_json(force=True) or {}
@@ -532,6 +686,20 @@ def journal_book():
         return fail(e)
 
 
+@app.route("/api/journal/normalize", methods=["POST"])
+def journal_normalize():
+    """旧稿补格式：裸节标题加 `##`、`【小节】` 转标题。带 day 只处理单篇。"""
+    try:
+        b = request.get_json(force=True) or {}
+        day = str(b.get("day") or "").strip()
+        r = journal.normalize(day) if day else journal.normalize_all()
+        if r.get("ok") and day and r.get("changed"):
+            emtlink.journal_mirror(day)
+        return jsonify(r)
+    except Exception as e:
+        return fail(e)
+
+
 @app.route("/api/journal/<day>", methods=["GET", "DELETE"])
 def journal_entry(day):
     """单日日记：GET 读取正文，DELETE 删除该文件。"""
@@ -562,9 +730,18 @@ def emt_ai_generate():
     """生成当日日记或行为体检。force=true 才会覆盖手写日记。"""
     try:
         b = request.get_json(silent=True) or {}
-        return jsonify(emtai.generate(kind=str(b.get("kind") or ""),
-                                      day=str(b.get("day") or ""),
-                                      force=bool(b.get("force"))))
+        kind = str(b.get("kind") or "")
+
+        def _gen():
+            r = emtai.generate(kind=kind, day=str(b.get("day") or ""),
+                               force=bool(b.get("force")))
+            # mode=ai 才是真调了模型；local/fallback 已在 emtai 里单独记 warn
+            if r.get("ok") and r.get("mode") == "ai":
+                r["message"] = "AI 生成完成（%s，%s 字）" % (
+                    "日记" if kind == "journal" else "体检",
+                    len(str(r.get("text") or "")))
+            return r
+        return jsonify(_shortcut("ai", "AI 生成", _gen))
     except Exception as e:
         return fail(e)
 
@@ -586,8 +763,17 @@ def emt_history():
         size = int(b.get("size") or 500)
         what = b.get("what") or ["trades", "orders", "flows"]
         what = tuple(w for w in what if w in ("trades", "orders", "flows")) or ("trades",)
-        r = emtlink.pull_history(start, end, size, what)
-        return jsonify(dict(r, state=emtlink.hist_state()))
+
+        def _pull():
+            r = emtlink.pull_history(start, end, size, what)
+            # pull_history 自己返回 ok/total/ms；补一句人能读的进记录
+            if r.get("ok"):
+                r.setdefault("message", "历史回流 %s ~ %s · %s 共 %s 条" % (
+                    start or "最早", end or "至今", "/".join(what),
+                    r.get("total") or r.get("added") or 0))
+            return r
+        return jsonify(dict(_shortcut("emt_history", "实盘历史回流", _pull),
+                            state=emtlink.hist_state()))
     except Exception as e:
         return fail(e)
 
@@ -705,13 +891,18 @@ def industry_members():
 
 @app.route("/api/sources", methods=["GET", "POST"])
 def sources_api():
-    """可选账号数据源（Tushare Pro）：GET 状态，POST 保存 / 清除 Token。"""
+    """数据源：GET 现状；POST 存 Tushare Token / 清除 / 改估值源顺序与开关。"""
     try:
         if request.method == "GET":
             return jsonify(datasource.status())
         b = request.get_json(silent=True) or {}
-        if b.get("action") == "clear":
+        act = str(b.get("action") or "")
+        if act == "clear":
             return jsonify(datasource.clear())
+        if act == "valsrc":
+            import valsrc
+            valsrc.save(b)
+            return ok(valuation=valsrc.status(), sources=datasource.status())
         return jsonify(datasource.save(b.get("token"), b.get("enabled")))
     except Exception as e:
         return fail(e)
@@ -719,7 +910,13 @@ def sources_api():
 
 @app.route("/api/sources/test", methods=["POST"])
 def sources_test():
+    """单源探测：带 source=em/tx/ts/bs 就测估值源的某一路，否则测 Tushare 账号。"""
     try:
+        b = request.get_json(silent=True) or {}
+        key = str(b.get("source") or "")
+        if key:
+            import valsrc
+            return jsonify(valsrc.test(key))
         return jsonify(datasource.test())
     except Exception as e:
         return fail(e)
@@ -758,6 +955,119 @@ def data_hub():
         return fail(e)
 
 
+@app.route("/api/tasks")
+def tasks_status():
+    """全局任务状态：顶栏那盏指示灯读这一份。
+
+    为什么要聚合在一处：行情增量、流水线、上市名单预热、退市股补数据
+    各自都有 running 标志，分散在 4 个模块里。界面上要是每个地方画一个进度条，
+    用户得满屏找「现在到底在跑什么」。这里统一成一组 {name, done, total, pct}，
+    顶栏只显示一条总进度，悬停看明细。
+
+    返回：
+      running  是否有任何任务在跑
+      tasks    正在跑的任务列表（含进度与文案）
+      overall  所有任务的总进度（已完成的加权平均，0~1）
+      recent   最近结束的任务（给悬停面板补一句「刚完成什么」）
+    """
+    try:
+        tasks = []
+
+        # 1) 行情增量（bulkdata）：最慢的一段，进度最值得看
+        try:
+            import bulkdata
+            st = bulkdata.status() or {}
+            if st.get("running"):
+                d, t = int(st.get("done") or 0), int(st.get("total") or 0)
+                tasks.append({
+                    "key": "quote", "name": "行情增量",
+                    "done": d, "total": t,
+                    "pct": (d / t) if t else None,
+                    "detail": ("%d / %d 只 · 成功 %s · 跳过 %s · 失败 %s"
+                               % (d, t, st.get("ok") or 0, st.get("skip") or 0, st.get("fail") or 0)),
+                })
+        except Exception:
+            pass
+
+        # 2) 流水线（pipeline）：按「第几段 / 共几段」估进度
+        try:
+            import pipeline
+            run = pipeline.RUN or {}
+            if run.get("running"):
+                stp = run.get("step") or {}
+                idx = int(stp.get("index") or 0)
+                tot = int(stp.get("total") or 0)
+                pct = stp.get("pct")
+                if pct is None and tot:
+                    pct = max(0.0, min(1.0, (idx - 1) / float(tot)))
+                tasks.append({
+                    "key": "pipeline", "name": stp.get("name") or "数据链更新",
+                    "done": max(0, idx - 1), "total": tot,
+                    "pct": (float(pct) if pct is not None else None),
+                    "detail": (("第 %d / %d 步" % (idx, tot)) if tot else "准备中") +
+                              ((" · " + str(stp.get("detail"))) if stp.get("detail") else ""),
+                })
+        except Exception:
+            pass
+
+        # 3) 上市名单同步 / 退市股补行情 / 全 A 行情预热：都是长任务
+        try:
+            import listing
+            st = listing.prewarm_status() or {}
+            if st.get("running"):
+                d, t = int(st.get("done") or 0), int(st.get("total") or 0)
+                tasks.append({
+                    "key": "listing_prewarm", "name": "退市股补行情",
+                    "done": d, "total": t, "pct": (d / t) if t else None,
+                    "detail": str(st.get("message") or "")[:80],
+                })
+        except Exception:
+            pass
+        try:
+            import listing
+            sy = getattr(listing, "_SYNC", {}) or {}
+            if sy.get("running"):
+                tasks.append({
+                    "key": "listing_sync", "name": "上市名单同步",
+                    "done": 0, "total": 0, "pct": None,
+                    "detail": str(sy.get("message") or "正在同步")[:80],
+                })
+        except Exception:
+            pass
+        try:
+            import universe
+            st = universe.prewarm_status() or {}
+            if st.get("running"):
+                d, t = int(st.get("done") or 0), int(st.get("total") or 0)
+                tasks.append({
+                    "key": "universe_prewarm", "name": "全 A 行情预热",
+                    "done": d, "total": t, "pct": (d / t) if t else None,
+                    "detail": str(st.get("message") or "")[:80],
+                })
+        except Exception:
+            pass
+
+        # 总进度：对各任务的 pct 取平均（没给 pct 的按「刚开始」算 0）
+        if tasks:
+            vals = [float(t["pct"]) if t.get("pct") is not None else 0.0 for t in tasks]
+            overall = sum(vals) / len(vals)
+        else:
+            overall = None
+
+        recent = []
+        try:
+            import store
+            recent = [r for r in (store.runs_list(6) or []) if r.get("ok") is not None][:3]
+        except Exception:
+            pass
+
+        return ok(running=bool(tasks), tasks=tasks,
+                  overall=(round(overall, 4) if overall is not None else None),
+                  recent=recent)
+    except Exception as e:
+        return fail(e)
+
+
 @app.route("/api/data/run", methods=["POST"])
 def data_run():
     """中枢统一更新：level=auto/quick/full，或 only 显式选段；后台跑，轮询 freshness。"""
@@ -781,10 +1091,73 @@ def data_run():
 
 @app.route("/api/data/runs")
 def data_runs():
-    """统一更新记录（流水线 + 各页快捷 + 定时任务），最新在前。"""
+    """统一更新记录（流水线 + 各页快捷 + 定时任务），最新在前。
+
+    支持 kind/trigger/ok/q 筛选与 offset 翻页：记录不清空，翻历史靠分页。
+    """
     try:
-        limit = max(1, min(int(request.args.get("limit", 60)), 200))
-        return ok(runs=pipeline.history(limit))
+        a = request.args
+        limit = max(1, min(int(a.get("limit", 60)), 300))
+        offset = max(0, int(a.get("offset", 0) or 0))
+        return jsonify(store.runs_page(
+            limit=limit, offset=offset,
+            kind=str(a.get("kind") or ""), trigger=str(a.get("trigger") or ""),
+            ok=str(a.get("ok") or ""), q=str(a.get("q") or "").strip()))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/logs", methods=["GET", "POST"])
+def logs_api():
+    """系统运行日志：GET 列表/统计/导出，POST 清理。
+
+    和「更新记录」的区别：那边记「做了什么、成没成」，这里记「为什么」——
+    退避到几点、降级到哪个源、异常栈、AI 回退原因。
+    """
+    try:
+        if request.method == "POST":
+            b = request.get_json(silent=True) or {}
+            if b.get("action") == "prune":
+                n = store.log_prune()
+                store.log("app", "手动清理日志 %d 条" % n, level="info", act="prune")
+                return ok(removed=n, facets=store.log_facets())
+            return fail("未知操作")
+        a = request.args
+        if a.get("export"):
+            txt = store.log_text(
+                limit=max(1, min(int(a.get("limit", 2000)), 20000)),
+                level=str(a.get("level") or ""), src=str(a.get("src") or ""),
+                q=str(a.get("q") or "").strip())
+            name = "quantdesk-log-%s.txt" % dt.datetime.now().strftime("%Y%m%d-%H%M")
+            return Response(txt, mimetype="text/plain; charset=utf-8",
+                            headers={"Content-Disposition": "attachment; filename=%s" % name})
+        d = store.logs_list(
+            limit=max(1, min(int(a.get("limit", 200)), 1000)),
+            offset=max(0, int(a.get("offset", 0) or 0)),
+            level=str(a.get("level") or ""), src=str(a.get("src") or ""),
+            q=str(a.get("q") or "").strip())
+        d["facets"] = store.log_facets()
+        d["keep"] = {"days": store.LOG_KEEP_DAYS, "rows": store.LOG_KEEP_ROWS}
+        return jsonify(d)
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/logs/ui", methods=["POST"])
+def logs_ui():
+    """右上角通知回流：把「用户当时看到了什么」也存进运行日志。
+
+    前端在 toast() 里攒 1.5 秒合成一批发过来，不是每条一个请求。
+    同样的提示 20 秒内重复弹（轮询失败最常见）前端已合并，这里只做长度与
+    级别的兜底校验，写多少条如实回多少。
+    """
+    try:
+        b = request.get_json(silent=True) or {}
+        items = b.get("items")
+        if not isinstance(items, list):
+            return jsonify({"ok": False, "error": "items 必须是数组"})
+        n = store.log_many(items, src="ui")
+        return ok(written=n)
     except Exception as e:
         return fail(e)
 
@@ -810,7 +1183,7 @@ def screen_review():
     try:
         days = int(request.args.get("days", 60))
         step = int(request.args.get("step", 5))
-        topn = int(request.args.get("topn", 10))
+        topn = int(request.args.get("topn", 20))
         # 历史重放要给 200 只股票各算一遍二十年因子，冷跑 6 秒。
         # 它只依赖「数据日 + 参数 + 模型」，这几个量都没变就直接给上次的结果。
         snap = screener._json_read(screener.SNAPSHOT_META, {}) or {}
@@ -854,6 +1227,146 @@ def screen_picks():
         return fail(e)
 
 
+@app.route("/api/screen/resume")
+def screen_resume():
+    """首屏恢复：直接返回上一次真正落盘的那批候选，不做任何重算。
+
+    为什么要有这个接口：首屏原本调 /api/screen/run 自动出数，虽然 record=False
+    不写记录，但数据日推进后第一次打开仍会重建全市场快照（约 6 秒），
+    用户误以为「一打开就重新选股」。落盘的 picks + picks_meta 已经保存了
+    候选与因子，恢复它们只要几十毫秒 —— 首屏应该先看到上次的结果，
+    由彩虹提醒告诉用户「该重新选了」，而不是悄悄重算。
+
+    返回结构与 /api/screen/run 对齐（candidates / as_of / funnel / industry 等），
+    前端 renderScrRows / renderFunnel 可以直接用，无需改渲染层。
+    """
+    try:
+        import store
+        import histcache
+
+        # 最近一次真正落盘的批次：按 recorded_at 倒序取第一批
+        rows = store.conn().execute(
+            "SELECT as_of, recorded_at, code, name, industry, rank, score, close "
+            "FROM picks ORDER BY recorded_at DESC, as_of DESC LIMIT 200").fetchall()
+        if not rows:
+            return jsonify({"ok": True, "empty": True, "candidates": [],
+                            "as_of": "", "last_pick_at": "",
+                            "note": "还没有落盘的选股记录"})
+
+        as_of = str(rows[0][0])[:10]
+        rec_at = str(rows[0][1])
+        # meta 里存了因子（mom20/vol20/rsi14/turnover/score/base_score 等）
+        mm = store.picks_meta_map(as_of, rec_at)
+        cands = []
+        for r in rows:
+            if str(r[0])[:10] != as_of or str(r[1]) != rec_at:
+                continue
+            code = str(r[2]).zfill(6)
+            m = mm.get((as_of, rec_at, code)) or {}
+            item = {
+                "code": code, "name": r[3] or "", "industry": r[4] or "",
+                "rank": r[5], "score": r[6], "close": r[7],
+                "funnel_stage": "保留",
+            }
+            # 因子值直接铺进候选行，展开详情时才用得到
+            for k in screener.META_KEYS:
+                if k in m and m[k] is not None:
+                    item[k] = m[k]
+            # pct 由缓存算：记录日收盘 → 最新收盘（与 picks_log 同口径）
+            try:
+                bar = store.conn().execute(
+                    "SELECT close FROM bars WHERE code=? AND date>=? ORDER BY date DESC LIMIT 1",
+                    (code, as_of)).fetchone()
+                if bar and bar[0] and item.get("close"):
+                    item["pct"] = (float(bar[0]) / float(item["close"]) - 1) * 100
+            except Exception:
+                pass
+            cands.append(item)
+
+        cands.sort(key=lambda x: (x.get("rank") if isinstance(x.get("rank"), int) else 999))
+        for i, c in enumerate(cands, 1):
+            c["rank"] = i
+
+        # 真实价换算（与 screen_run 末尾一致）
+        try:
+            qmap = spot.prev_closes([c["code"] for c in cands])
+            for c in cands:
+                hfq_last = c.get("close")
+                lb = histcache.last_bar(c["code"])
+                if lb and lb.get("close"):
+                    hfq_last = lb["close"]
+                c["close_real"] = spot.real_price(c.get("close"), hfq_last,
+                                                  str(lb.get("date") or "")[:10] if lb else "",
+                                                  qmap.get(c["code"]))
+        except Exception:
+            pass
+
+        # 恢复同批次的漏斗与辩护：记录页回看不该烧 token，直接取存档。
+        # 决策档案（pick_archive）按 (as_of, recorded_at) 存了当时的漏斗链；
+        # 辩护（pick_bear）存了裁决全文。首屏恢复拿回来，才能让「候选榜 +
+        # 行业分布 + 辩护」成对出现，而不是刷新一次就剩一排光杆候选。
+        funnel_stages, dropped_n, sample_n, neutral_mode = [], 0, 0, ""
+        try:
+            # 先只查摘要定位 id，再读那一份 payload：存档每份可能几 MB，
+            # 一次拉 40 份完整 JSON 会让首屏恢复慢一个数量级。
+            hit_id = next((a["id"] for a in store.archive_meta_list(limit=40, as_of=as_of)
+                           if str(a.get("recorded_at") or "") == rec_at), 0)
+            if hit_id:
+                a = store.archive_get(hit_id)
+                if a:
+                    f = a["payload"].get("funnel") or []
+                    funnel_stages = [s for s in f if isinstance(s, dict)]
+                    # 打分口径（中性化模式）随批次存档；老存档没有这个字段，
+                    # 前端会显示「—」，不影响候选本身。
+                    neutral_mode = str(a["payload"].get("neutral") or "")
+                    # 漏斗淘汰数 = 样本池 before − 最后一层 after（与 screen_run 的
+                    # len(scored)-len(kept) 同义，只是从存档反推）
+                    if funnel_stages:
+                        before = int(funnel_stages[0].get("before") or 0)
+                        after = int(funnel_stages[-1].get("after") or 0)
+                        dropped_n = max(0, before - after)
+                        # 右上角的「只样本」= 进入打分排序的只数（screen_run 的
+                        # len(kept)），不是候选只数。从存档的 rank 层反推，
+                        # 老存档没有 rank 层时退到最后一层，二者都是 kept。
+                        rank = next((s for s in funnel_stages
+                                     if s.get("key") == "rank"), funnel_stages[-1])
+                        sample_n = int(rank.get("after") or 0)
+        except Exception:
+            pass
+        # 行业暴露：从恢复出来的候选现场重算（等权行业权重 + 全市场基线）。
+        # 不落盘也拿得到 —— 基线用行业映射的全体成分数，与 screen_run 的
+        # neutral.exposure(picked, base) 保持同口径。
+        expo = {}
+        try:
+            import neutral
+            base = pd.DataFrame({"industry": list(industry.load_map().values())})
+            picked_df = pd.DataFrame([
+                {"code": c["code"], "industry": c.get("industry") or "未分类",
+                 "name": c.get("name") or ""}
+                for c in cands if c.get("industry")])
+            if len(picked_df):
+                expo = neutral.exposure(picked_df.to_dict("records"), base)
+        except Exception:
+            expo = {}
+
+        return jsonify({
+            "ok": True, "empty": False, "candidates": cands,
+            "as_of": as_of, "count": sample_n, "topn": len(cands),
+            "last_pick_at": str(store.picks_version()[1] or ""),
+            "restored": True,
+            "engine": "restored",
+            "funnel": {"stages": funnel_stages, "dropped": dropped_n},
+            "industry": {"cap": 0, "capped": False, "trimmed": [], "counts": {},
+                         "note": "恢复上次落盘候选", "exposure": expo},
+            "neutral": {"mode": neutral_mode} if neutral_mode else {},
+            "model": {}, "snapshot_reused": True,
+            "record": {"ok": True, "skipped": True, "note": "恢复展示，不写记录",
+                       "recorded_at": rec_at},
+        })
+    except Exception as e:
+        return fail(e)
+
+
 @app.route("/api/screen/snapshot", methods=["POST"])
 def screen_snapshot():
     """生成横截面因子快照（只读本地缓存，不联网）。"""
@@ -876,7 +1389,7 @@ def screen_dataset():
             start=str(b.get("start") or "20220101"),
             end=b.get("end") or dt.date.today().strftime("%Y%m%d"),
             horizon=int(b.get("horizon") or 10), step=int(b.get("step") or 5),
-            max_symbols=int(b.get("max_symbols") or 300),
+            max_symbols=int(b.get("max_symbols") or 800),
             scope=str(b.get("scope") or "cached"),
             neutral_mode=str(b.get("neutral") or "none"),
             label_mode=str(b.get("label_mode") or "rank")))
@@ -899,7 +1412,7 @@ def screen_run():
     """一键选股：横截面快照 → 模型/基准打分 → 漏斗过滤 → 行业约束 → TopN 候选。"""
     try:
         b = request.get_json(silent=True) or {}
-        topn = max(1, min(int(b.get("topn") or 10), 100))
+        topn = max(1, min(int(b.get("topn") or 20), 100))
         use_model = b.get("use_model", True) in (True, "1", "true", "True")
         cap = b.get("industry_cap")
         cap = screener.INDUSTRY_CAP_DEFAULT if cap is None else max(0, min(int(cap), 20))
@@ -952,26 +1465,83 @@ def screen_run():
         if scored.empty:
             return jsonify({"ok": False, "error": "打分结果为空"})
         # 1) 漏斗：逐层剔除硬性不合格样本（缺数据放行，不做黑箱）
-        kept, stages = screener.funnel(scored, funnel_cfg)
+        #    detail=True 额外拿回「谁被哪层淘汰」，写进决策档案供事后归因。
+        kept, stages, killed = screener.funnel(scored, funnel_cfg, detail=True)
         if kept.empty:
             return jsonify({"ok": False, "error": "漏斗过滤后没有剩余样本，请放宽「极端风险 / 趋势」条件",
                             "funnel": {"stages": stages}})
         # 2) 行业约束 + TopN
         sel = screener.select(kept, topn=topn, cap=cap)
-        # 3) 落盘候选，交给 T+N 后验。首屏自动出数会带 record=False：
+        for c in sel["picked"]:
+            c["funnel_stage"] = "保留"
+
+        # 3) 空头辩护（可选）：只对已入选的 TopN 做，成本可控。
+        #    被否决的票从最终名单剔除，但完整写进决策档案 —— 否则事后无法检验
+        #    「否决到底拦得对不对」，那就等于给自己加了一个不可回测的过滤器。
+        bear = None
+        all_cand = sel["picked"]
+        final_cand = all_cand
+        if b.get("bear") and all_cand:
+            try:
+                import llm as _llm
+                bear = _llm.bear_case(all_cand, as_of=str(r.get("as_of") or ""))
+                if bear.get("mode") == "llm" and bear.get("rows"):
+                    vmap = {x["code"]: x for x in bear["rows"]}
+                    for c in all_cand:
+                        m = vmap.get(str(c.get("code")))
+                        if m:
+                            c["verdict"] = m["verdict"]
+                            c["bear_case"] = m.get("bears") or []
+                            c["llm_reason"] = m.get("judge_reason") or ""
+                            c["bear_enough"] = bool(m.get("enough"))
+                    drop = set(bear.get("drop_codes") or [])
+                    final_cand = [c for c in all_cand if str(c.get("code")) not in drop]
+                    for i, c in enumerate(final_cand, 1):
+                        c["rank"] = i
+            except Exception as e:                     # noqa: BLE001
+                bear = {"ok": False, "error": str(e)[:160]}
+
+        # 4) 落盘候选，交给 T+N 后验。首屏自动出数会带 record=False：
         #    那种跑法只是把界面填满，不是用户的一次选股，写进记录会污染历史。
         # 历史截止日只用于回看，不能覆盖那一天的实盘候选记录：
 # 同 as_of 的记录是整期替换的，一次历史实验就会把真实留档冲掉。
         latest_day = _latest_bar_day()
+        archive = {"engine": r.get("engine"), "topn": topn,
+                   "as_of_param": want_as_of,
+                   # 中性化口径一起存档：resume 时行业分布卡要显示「当时用的什么口径」
+                   "neutral": want_neutral,
+                   "funnel": stages,
+                   "picks": [{k: c.get(k) for k in
+                              ("code", "name", "industry", "score", "close",
+                               "close_real", "verdict", "llm_reason", "funnel_stage")}
+                             | {"factors": {k: c.get(k) for k in screener.META_KEYS},
+                                "bears": c.get("bear_case") or []}
+                             for c in all_cand],
+                   "dropped": [{"code": k, "stage": v} for k, v in list(killed.items())[:3000]],
+                   "llm": ({"mode": bear.get("mode"), "summary": bear.get("summary"),
+                            "model": bear.get("model"), "judge_model": bear.get("judge_model"),
+                            "dropped": bear.get("dropped")} if bear else None)}
         if b.get("record", True) and want_as_of and latest_day and want_as_of != latest_day:
             rec = {"ok": True, "skipped": True,
                    "note": "历史截止日回看，不计入选股记录"}
         elif b.get("record", True):
-            rec = screener.record_picks(sel["picked"], r.get("as_of", ""))
+            rec = screener.record_picks(final_cand, r.get("as_of", ""), archive=archive)
         else:
             rec = {"ok": True, "skipped": True, "note": "首屏自动出数，不计入选股记录"}
+        # 空头辩护随批次一起落盘：只在真正留档的批次上存（首屏静默出数不存），
+        # 这样「这一批为什么只留这几只」和候选榜永远在同一份记录里。
+        if bear and bear.get("mode") == "llm" and rec.get("recorded_at"):
+            try:
+                store.bear_put(str(r.get("as_of") or "")[:10], str(rec["recorded_at"]),
+                               {**bear, "at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                               mode="llm")
+                bear["saved"] = True
+            except Exception:
+                bear["saved"] = False
         r["funnel"] = {"stages": stages, "dropped": len(scored) - len(kept),
-                       "kept": len(kept)}
+                       "kept": len(kept),
+                       "killed": len(killed)}
+        r["bear"] = bear
         r["industry"] = {"cap": sel["cap"], "capped": sel["capped"],
                          "trimmed": sel["trimmed"], "trimmed_count": sel["trimmed_count"],
                          "counts": sel["industry_counts"], "note": sel["note"],
@@ -985,7 +1555,7 @@ def screen_run():
             r["last_pick_at"] = ""
         r["topn"] = topn
         r["count"] = len(kept)
-        r["candidates"] = sel["picked"]
+        r["candidates"] = final_cand
         # 候选表的 close 是后复权价（因子口径），直接给人看会差出复权因子
         # （罗曼股份 hfq 97.87 vs 真实 52）。用腾讯昨收/现价把展示价换算回真实价，
         # 涨跌幅与收益口径不受影响（本就同口径相除）。
@@ -1032,8 +1602,31 @@ def screen_llm():
                 llm.save_last(r, as_of)
             except Exception:
                 pass
+            # 同时按批次入库：llm_last.json 只能记住「最近一次」，换一批就覆盖，
+            # 而候选榜要能按「哪一批」取回当时的解读（不同 TopN 各存各的）。
+            try:
+                import store
+                batch = b.get("batch") if isinstance(b.get("batch"), dict) else {}
+                rec = str(batch.get("recorded_at") or "")
+                if rec and r.get("ok") and r.get("rows"):
+                    store.llm_put(str(batch.get("as_of") or as_of), rec, r,
+                                  mode=r.get("mode", ""), model=r.get("model", ""))
+                    r["saved"] = True
+            except Exception as e:                     # noqa: BLE001
+                r["saved"] = False
+                r["save_error"] = str(e)[:160]
             return jsonify(r)
         if action == "last":
+            # 优先按批次取（前端给了 recorded_at），否则取最近一份
+            try:
+                import store
+                as_of = str(b.get("as_of") or "")[:10]
+                rec = str(b.get("recorded_at") or "")
+                d = store.llm_get(as_of, rec) if (as_of or rec) else None
+                if d:
+                    return jsonify({"ok": True, "saved": d, "from": "db"})
+            except Exception:
+                pass
             return jsonify(llm.load_last())
         if action == "status":
             return jsonify(llm.status())
@@ -1054,6 +1647,205 @@ def cache():
         return ok(cleared=n)
     except Exception as e:
         return fail(e)
+
+
+# ==========================================================================
+# P0-1 上市名单（point-in-time）/ P0-3 因子体检 / P1-4 目标持仓
+# P1-5 空头辩护 A/B / P2-6 资金流
+# ==========================================================================
+
+@app.route("/api/listing", methods=["GET"])
+def listing_api():
+    """上市名单状态 + 退市股行情覆盖（回放能不能真的纳入退市股，看这里）。"""
+    try:
+        d = {**listing.status(), "coverage": listing.coverage()}
+        # fresh 是按自然日算的（sync 的当日缓存依赖它），但周末会显示「待同步」，
+        # 而名单其实已经跟上了最近一个交易日。给页面一个按交易日算的 lag，
+        # 跟侧栏待办同一口径。
+        d["lag"] = pipeline._lag(
+            pipeline._market_days(pipeline._expected_day()), d.get("updated") or "")
+        return jsonify(d)
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/listing/sync", methods=["POST"])
+def listing_sync():
+    try:
+        b = request.get_json(silent=True) or {}
+        return jsonify(listing.sync_async(force=bool(b.get("force", True))))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/listing/prewarm", methods=["GET", "POST"])
+def listing_prewarm():
+    """补退市股历史行情（串行，可停）。没有它们，as-of 过滤只是一句口号。"""
+    try:
+        if request.method == "GET":
+            return jsonify(listing.prewarm_status())
+        b = request.get_json(silent=True) or {}
+        if str(b.get("action") or "start") == "stop":
+            return jsonify(listing.prewarm_stop())
+        return jsonify(listing.prewarm_delisted(limit=int(b.get("limit") or 0)))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/factors", methods=["GET", "POST"])
+def factors_api():
+    """单因子体检。首次计算约 15~45 秒（含资金流因子），之后走缓存秒开。"""
+    try:
+        if request.method == "POST":
+            b = request.get_json(silent=True) or {}
+        else:
+            b = request.args
+        days = int(b.get("days") or 120)
+        step = int(b.get("step") or 1)
+        horizon = int(b.get("horizon") or 5)
+        limit = int(b.get("limit") or 300)
+        force = str(b.get("force") or "") in ("1", "true", "True")
+        with_cap = str(b.get("capital") or "1") in ("1", "true", "True", "")
+        # 资金流因子交给 checkup 在缓存未命中时才算，别在这里预计算
+        return jsonify(factors.checkup(days=days, step=step, horizon=horizon,
+                                       limit=limit, force=force, with_cap=with_cap))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/portfolio", methods=["GET", "POST"])
+def portfolio_api():
+    """目标持仓：等权/打分加权 + 单票/行业上限 + 差额头寸 + 成本估算。"""
+    try:
+        if request.method == "GET":
+            cur_list, ov = portfolio.current_positions()
+            # 前端要显示「账本持仓 N 只」，以前只返回了 day/total/mv/cash，
+            # 于是那行永远是「0 只」。
+            cur = dict(ov or {})
+            cur["positions"] = len(cur_list or [])
+            return jsonify({"ok": True, "config": portfolio.cfg(), "current": cur})
+        b = request.get_json(silent=True) or {}
+        if str(b.get("action") or "") == "config":
+            return jsonify(portfolio.save(b.get("config") or {}))
+        picks = b.get("picks") or LAST_RUN.get("rows") or []
+        if not picks:
+            # 没有本次运行结果时，退回最近一个落盘批次（重启后也能算）
+            try:
+                last = review.picks_log(limit=1)
+                batches = last.get("batches") or []
+                if batches:
+                    picks = batches[0].get("picks") or []
+                    picks = [{"code": x["code"], "name": x["name"],
+                              "industry": x["industry"], "score": x.get("score"),
+                              "close_real": x.get("rec_real") or x.get("rec_close")}
+                             for x in picks]
+            except Exception:
+                picks = []
+        return jsonify(portfolio.target(picks, capital=float(b.get("capital") or 0),
+                                        patch=b.get("config") or None))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/screen/bear", methods=["GET", "POST"])
+def screen_bear():
+    """空头辩护：对上一轮候选生成否决理由并裁决。
+
+    GET  ?as_of=&recorded_at=  读回「那一批」存过的辩护（不给 recorded_at 时取该数据日最近一份）
+    POST {candidates, as_of, batch:{as_of,recorded_at}} 跑一次，若指定批次则随批次落盘。
+    空头辩护和候选榜是一体的：只存候选不存理由，事后就没法检验「否决到底拦得对不对」。
+    """
+    try:
+        if request.method == "GET":
+            import store
+            a = request.args
+            as_of = str(a.get("as_of") or "")[:10]
+            rec = str(a.get("recorded_at") or "")
+            p = store.bear_get(as_of, rec)
+            if not p:
+                return jsonify({"ok": True, "saved": False,
+                                "note": "这一批还没有存过空头辩护"})
+            return jsonify({**p, "saved": True,
+                            "batch": {"as_of": as_of, "recorded_at": rec}})
+        b = request.get_json(silent=True) or {}
+        rows = b.get("candidates") or LAST_RUN.get("rows") or []
+        as_of = str(b.get("as_of") or LAST_RUN.get("as_of", ""))[:10]
+        r = llm.bear_case(rows, as_of=as_of, force=bool(b.get("force")),
+                          judge=bool(b.get("judge", True)))
+        # 只有真跑出裁决才存：local 降级/未启用时存下来，下次界面上会出现一份
+        # 「看起来做过辩护」的空结论，比不存更误导。
+        batch = b.get("batch") if isinstance(b.get("batch"), dict) else {}
+        rec = str(batch.get("recorded_at") or "")
+        if rec and r.get("ok") and r.get("mode") == "llm":
+            try:
+                import store
+                store.bear_put(as_of or str(batch.get("as_of") or ""), rec,
+                               {**r, "at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+                               mode=r.get("mode"))
+                r["saved"] = True
+                r["batch"] = {"as_of": as_of, "recorded_at": rec}
+            except Exception as e:                     # noqa: BLE001
+                r["saved"] = False
+                r["save_error"] = str(e)[:160]
+        return jsonify(r)
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/review/llm-ab", methods=["GET"])
+def review_llm_ab():
+    """离线 A/B：被 LLM 否决的票 vs 留下的票，谁的 T+N 更好。"""
+    try:
+        return jsonify(review.llm_ab(limit=int(request.args.get("limit", 30))))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/review/funnel", methods=["GET"])
+def review_funnel():
+    """漏斗归因：被各层淘汰的票，事后是不是反而涨得好。"""
+    try:
+        a = request.args
+        return jsonify(review.funnel_check(days=int(a.get("days", 60)),
+                                           step=int(a.get("step", 5)),
+                                           limit=int(a.get("limit", 300))))
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/picks/archive", methods=["GET"])
+def picks_archive():
+    """决策档案：某批次选了谁、为什么、被否决的是谁、被哪层漏斗淘汰。"""
+    try:
+        a = request.args
+        if a.get("id"):
+            return jsonify({"ok": True, "archive": store.archive_get(int(a["id"]))})
+        return jsonify({"ok": True,
+                        "items": store.archive_list(limit=int(a.get("limit", 20)),
+                                                    as_of=str(a.get("as_of") or ""))})
+    except Exception as e:
+        return fail(e)
+
+
+@app.route("/api/capital", methods=["GET", "POST"])
+def capital_api():
+    """资金流：两融 / 龙虎榜 / 大宗（北向个股已停止披露）。"""
+    try:
+        if request.method == "GET":
+            a = request.args
+            if a.get("codes"):
+                codes = [c for c in str(a["codes"]).split(",") if c.strip()]
+                return jsonify(capital.preview(codes, as_of=str(a.get("as_of") or "")))
+            return jsonify({**capital.status(), "config": capital.cfg(),
+                            "factors": capital.factor_meta()})
+        b = request.get_json(silent=True) or {}
+        if str(b.get("action") or "sync") == "config":
+            return jsonify(capital.save(b.get("config") or {}))
+        return jsonify(capital.sync_async(days=int(b.get("days") or 25),
+                                          force=bool(b.get("force"))))
+    except Exception as e:
+        return fail(e)
+
 
 
 if __name__ == "__main__":
