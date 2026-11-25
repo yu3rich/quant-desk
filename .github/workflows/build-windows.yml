@@ -61,7 +61,7 @@ jobs:
         run: |
           $exe = (Get-ChildItem packaging\dist\QuantDesk-Setup-*.exe | Select-Object -First 1).FullName
           "QuantDesk Windows 桌面版安装包（PyInstaller + Inno Setup）。系统要求 Windows 10/11 x64。数据目录 %LOCALAPPDATA%\QuantDesk\data" | Out-File -Encoding utf8 notes.txt
-          gh release create $env:GITHUB_REF_NAME $exe --title "QuantDesk $env:GITHUB_REF_NAME" --notes-file notes.txt --clobber
+          gh release create $env:GITHUB_REF_NAME $exe --title "QuantDesk $env:GITHUB_REF_NAME" --notes-file notes.txt
           if ($LASTEXITCODE -ne 0) { gh release upload $env:GITHUB_REF_NAME $exe --clobber }
 
   apk:
