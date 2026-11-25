@@ -152,6 +152,7 @@ def main() -> int:
 
     port = int(server.cfg().get("port", 8765))
     url = "http://127.0.0.1:%d/" % port
+    host = server.bind_host("--lan" in sys.argv)
 
     if _port_busy(port):
         print("")
@@ -167,6 +168,11 @@ def main() -> int:
 
     print("")
     print("  浏览器地址: %s" % url)
+    if host == "0.0.0.0":
+        for u in server.lan_urls(port):
+            print("  手机访问  : %s" % u)
+        print("  [注意] 已放开到局域网：没有登录，同网段的人都能访问与改动，")
+        print("         只建议在家用网络临时开启，用完关掉窗口即可。")
     print("  关闭本窗口即退出程序（数据都在 data/ 里，随时可再打开）")
     print(BANNER)
 
@@ -181,7 +187,7 @@ def main() -> int:
         print("  [警告] 后台任务启动失败（不影响手动使用）: %r" % (e,))
 
     try:
-        server.app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
+        server.app.run(host=host, port=port, debug=False, threaded=True)
     except KeyboardInterrupt:
         pass
     except Exception as e:

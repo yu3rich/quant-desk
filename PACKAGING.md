@@ -345,3 +345,38 @@ QuantDesk\
 
 - 真实券商账号登录（测试目录刻意没放 `emt.json`，避免密钥落到测试副本）：模板资源已确认存在且 `make_ocr()` 可初始化，但完整登录需在有账号的机器上点一次「同步账户」。
 - 杀软态度：本机 Defender 未拦截，换机时若被拦，加信任目录即可。
+
+---
+
+## 十、手机访问（PWA / 添加到主屏幕）
+
+**先说不打包的原因**：`lightgbm`、`scipy`、`baostock`、`tdxpy` 都没有 Android wheel，
+Kivy/buildozer 要为 arm64 自己编 `lib_lightgbm.so`，模型即便导 ONNX 也只有 Java 侧的
+`onnxruntime-android` 可用 —— 真离线 APK 等于重写后端，不是打包问题。
+
+所以手机端走「服务留在电脑、手机当终端」：
+
+### 开启步骤
+
+1. 电脑上以局域网模式启动：
+   - 源码：`python app.py --lan`（或把 `config.json` 的 `host` 改成 `0.0.0.0`）
+   - exe：`QuantDesk.exe --lan`
+2. 控制台会打印 `LAN / phone : http://192.168.x.x:8765/`，手机与电脑连同一个 WiFi，用这个地址打开。
+3. Chrome 菜单 →「添加到主屏幕」。图标与名称来自 `web/manifest.webmanifest`。
+
+### 已经做了什么
+
+- `web/manifest.webmanifest`：名称、`display: standalone`、主题色、192/512/maskable 三套图标。
+- 图标由 `web/icon.svg` 光栅化生成（`icon-192.png`、`icon-512.png`、`icon-512-maskable.png`）。
+- `index.html` 补了 `theme-color` 与 iOS 的 `apple-mobile-web-app-*` 元信息。
+- `app.py` 登记 `.webmanifest` 的 MIME（不登记会被当 `text/plain`，Chrome 直接忽略）。
+- 窄屏（≤860px）侧边栏自动变成顶部导航，页面无横向溢出；宽表格在自己的容器里横向滚动。
+
+### 已知限制
+
+- **`http://局域网IP` 不是安全上下文**：Chrome 不会安装成真正的 PWA，也不注册 service worker。
+  「添加到主屏幕」得到的是**快捷方式**（有图标，但打开仍是浏览器界面，可能带地址栏）。
+  想要完全全屏，需要 HTTPS（自签证书浏览器不信任）或做一个 WebView 壳 APK。
+- **没有登录**：`--lan` 放开后同网段任何人都能看账本、改配置。只在家用网络临时开，
+  用完关掉窗口（或把 `host` 改回 `127.0.0.1`）。
+- Windows 防火墙首次可能弹窗询问是否允许 Python 入站；若手机连不上，先检查这条规则。

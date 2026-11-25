@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import mimetypes
+import socket
 import sys
 import time
 import traceback
@@ -47,6 +49,10 @@ except Exception:
 from paths import BASE, WEB  # 打包后 BASE = exe 目录；WEB 优先 exe 同级，回落包内资源
 # 后验重放结果的小缓存：key → (时间戳, 响应体)
 _REVIEW_CACHE: dict = {}
+# .webmanifest 默认不在 Python 的映射表里，不显式登记会按 text/plain 发出，
+# Chrome 会忽略 manifest（表现为「添加到主屏幕」没有图标和独立窗口）
+mimetypes.add_type("application/manifest+json", ".webmanifest")
+
 app = Flask(__name__, static_folder=None)
 
 # NaN / Infinity 不是合法 JSON：Python 的 json 会原样输出，浏览器 JSON.parse 会直接失败，
@@ -121,6 +127,41 @@ def _on_unhandled(e):
 
 def cfg():
     return quant.load_config()
+
+
+def bind_host(force_lan: bool = False) -> str:
+    """监听地址。默认只监听本机；config.host 或 --lan 可放开到局域网。
+
+    放开后没有登录、没有鉴权，任何能连上这个端口的人都能看账本、改配置，
+    只适合在家用网络临时给手机用。
+    """
+    if force_lan:
+        return "0.0.0.0"
+    return str(cfg().get("host") or "127.0.0.1")
+
+
+def lan_urls(port: int) -> list[str]:
+    """本机所有可用的局域网地址（供手机访问）。取不到就返回空列表。"""
+    ips = set()
+    try:
+        # 连一个外部地址只为让系统选出默认出口网卡，UDP 不会真的发包
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(0.3)
+            s.connect(("223.5.5.5", 80))
+            ips.add(s.getsockname()[0])
+    except Exception:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.add(info[4][0])
+    except Exception:
+        pass
+    out = []
+    for ip in sorted(ips):
+        if ip.startswith("127.") or ip.startswith("169.254."):
+            continue
+        out.append("http://%s:%d/" % (ip, port))
+    return out
 
 
 def _latest_bar_day() -> str:
@@ -1850,11 +1891,16 @@ def capital_api():
 if __name__ == "__main__":
     c = cfg()
     port = int(c.get("port", 8765))
+    host = bind_host("--lan" in sys.argv)
     print("=" * 56)
     print("  QuantDesk - Local A-Share Quant Workbench")
     print("  Open in browser: http://127.0.0.1:%d/" % port)
+    if host == "0.0.0.0":
+        for u in lan_urls(port):
+            print("  LAN / phone  : %s" % u)
+        print("  [注意] 已放开到局域网：没有登录，同网段的人都能访问")
     print("  Press Ctrl+C or close this window to stop.")
     print("=" * 56)
     scheduler.start()          # 收盘后自动更新数据链（配置见「选股设置 → 数据准备」）
     emtlink.start_auto()       # 盘中低频刷新 + 收盘日结实盘账户（配置见「实盘复盘 → 账户设置」）
-    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
+    app.run(host=host, port=port, debug=False, threaded=True)

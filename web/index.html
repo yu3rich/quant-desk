@@ -4,6 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>QuantDesk · 本地 A 股量化工作台</title>
+<!-- 手机端「添加到主屏幕」：manifest 给图标与独立窗口，theme-color 决定状态栏配色。
+     注意 http://局域网IP 不是安全上下文，Chrome 只会建快捷方式（没有 service worker），
+     想要完全独立的全屏窗口得用 HTTPS 或 WebView 壳。 -->
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#1c5fd8">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="QuantDesk">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
 <link rel="icon" type="image/svg+xml" href="/static/icon.svg?v=20261120h">
 <link rel="stylesheet" href="/static/style.css?v=20261125b">
 <script src="/static/echarts.min.js"></script>

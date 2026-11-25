@@ -69,7 +69,11 @@ def test_topk_drop(picks):
     r = portfolio.target(picks, capital=300000, current=cur,
                          patch={"mode": "equal", "n_drop": 2, "topk": 10})
     sells = [x for x in (r.get("sells") or []) if x.get("action") == "卖出"]
-    check(len(sells) <= 2, "卖出不超过 n_drop：%d" % len(sells))
+    # n_drop 限制的是「换股（清仓）」数量，不是减仓：权重从超配回到目标本来就会产生卖出单，
+    # 把 trim 也算进来会随行情价格变化而误报（价格高时每只都要减仓）。
+    exits = [x for x in sells if int(x.get("target_qty") or 0) == 0]
+    check(len(exits) <= 2, "清仓换股不超过 n_drop：%d（卖出单共 %d 笔，其余为减仓）"
+          % (len(exits), len(sells)))
     check(r.get("n_drop") == 2, "返回 n_drop 参数")
 
 
