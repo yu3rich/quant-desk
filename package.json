@@ -1,0 +1,14 @@
+{
+  "name": "quant-desk-ui-tests",
+  "private": true,
+  "version": "1.0.0",
+  "description": "QuantDesk 前端行为测试（jsdom）",
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-force-exit tests_ui/*.test.mjs",
+    "test:watch": "node --test --watch tests_ui/*.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^31.0.1"
+  }
+}
