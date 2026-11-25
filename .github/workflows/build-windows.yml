@@ -53,3 +53,14 @@ jobs:
           git add QuantDesk-Setup-*.exe
           git commit -m "dist: windows installer ($env:GITHUB_SHA)"
           git push -f origin dist
+
+      - name: Create GitHub Release with installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $exe = Get-ChildItem packaging\dist\QuantDesk-Setup-*.exe | Select-Object -First 1
+          gh release create $env:GITHUB_REF_NAME $exe.FullName `
+            --title "QuantDesk $env:GITHUB_REF_NAME" `
+            --notes "QuantDesk Windows 桌面版安装包（PyInstaller onedir + Inno Setup）。系统要求：Windows 10/11 x64。数据目录：%LOCALAPPDATA%\QuantDesk\data" `
+            --clobber || gh release upload $env:GITHUB_REF_NAME $exe.FullName --clobber
