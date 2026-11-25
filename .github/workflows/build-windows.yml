@@ -80,6 +80,11 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # Chaquopy 的构建 pip 不兼容 Python ≥3.13（cgi 模块已移除），必须用 ≤3.12
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Build APK (debug)
         run: |
           chmod +x gradlew
