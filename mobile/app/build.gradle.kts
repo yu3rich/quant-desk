@@ -51,6 +51,7 @@ chaquopy {
             // （Chaquopy 会自动在 chaquo.com/pypi-13.1/ 中查找，无需手动 index）
             install("pandas")          // Chaquopy 官方 Android wheel
             install("numpy")           // Chaquopy 官方 Android wheel（pandas 依赖）
+            install("flask")           // app.py 的 Web 框架（此前遗漏导致启动闪退）
             install("requests")        // 纯 Python
             install("rsa")             // 纯 Python（emtl 依赖）
             install("Pillow")          // Chaquopy 官方 Android wheel（emtl 验证码识别用）
