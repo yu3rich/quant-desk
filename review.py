@@ -28,7 +28,21 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import listing
+try:
+    import listing
+except ImportError:  # 手机版未打包 listing.py：降级为"无上市信息"，全部票视为在市
+    class listing:  # type: ignore
+        @staticmethod
+        def alive(code, date=None):
+            return True
+
+        @staticmethod
+        def info(code):
+            return {}
+
+        @staticmethod
+        def coverage():
+            return {"covered": 0, "total": 0}
 import screener
 import store
 

@@ -37,6 +37,11 @@ android {
     }
 }
 
+dependencies {
+    // MainActivity 继承 AppCompatActivity，主题 parent 也是 Theme.AppCompat
+    implementation("androidx.appcompat:appcompat:1.6.1")
+}
+
 chaquopy {
     defaultConfig {
         // Chaquopy 15 默认 3.8；3.12+ 仅支持 64 位 ABI，选 3.11 兼容 arm64-v8a + x86_64
@@ -50,6 +55,9 @@ chaquopy {
             install("rsa")             // 纯 Python（emtl 依赖）
             install("Pillow")          // Chaquopy 官方 Android wheel（emtl 验证码识别用）
             install("baostock")        // 纯 Python
+            // 网络不稳：加长 pip 超时与重试（不改源，Chaquopy 的 chaquo.com 索引由插件自动注入）
+            options("--timeout", "120")
+            options("--retries", "20")
             // LightGBM：Chaquopy 仓库无 Android wheel，需用
             // chaquopy/server/pypi/build-wheel.py 在 x86-64 Linux 主机自编译后：
             //   install("./libs/lightgbm-*.whl")   // 本地 wheel，路径须含斜杠

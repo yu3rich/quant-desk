@@ -8,6 +8,7 @@ import sys
 import time
 import traceback
 from importlib import metadata
+import importlib
 from pathlib import Path
 
 import pandas as pd
@@ -18,26 +19,44 @@ import quant
 import watchlist
 import universe
 import screener
-import mlmodel
 import llm
 import industry
-import datasource
 import review
-import bulkdata
 import spot
 import chartdata
-import pipeline
-import scheduler
 import emtlink
 import emtbook
-import emtai
 import store
 import journal
-import listing
 import factors
 import portfolio
-import capital
-import stockview
+
+# ---- 可裁剪的条件导入 ----
+# 手机版（Chaquopy）不打包白名单外模块（见 mobile/MODULES.md 黑名单）：
+# mlmodel / datasource / bulkdata / pipeline / scheduler / emtai / listing /
+# capital / stockview / valsrc。桌面版全部真实导入，行为不变；手机版缺失时
+# 降级为桩对象，只有真正调用对应接口时才报错，保证 `import app` 成功。
+_MOBILE_ONLY = ("mlmodel", "datasource", "bulkdata", "pipeline", "scheduler",
+                "emtai", "listing", "capital", "stockview", "valsrc")
+
+
+class _MobileStub:
+    """白名单外模块缺失时的占位：访问任何属性即在调用时抛错。"""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def __getattr__(self, item: str):
+        def _unavailable(*_args, **_kwargs):
+            raise RuntimeError(f"手机版未打包模块 {self._name}，该接口不可用")
+        return _unavailable
+
+
+for _name in _MOBILE_ONLY:
+    try:
+        globals()[_name] = importlib.import_module(_name)
+    except ImportError:
+        globals()[_name] = _MobileStub(_name)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -900,7 +919,6 @@ def sources_api():
         if act == "clear":
             return jsonify(datasource.clear())
         if act == "valsrc":
-            import valsrc
             valsrc.save(b)
             return ok(valuation=valsrc.status(), sources=datasource.status())
         return jsonify(datasource.save(b.get("token"), b.get("enabled")))
@@ -915,7 +933,6 @@ def sources_test():
         b = request.get_json(silent=True) or {}
         key = str(b.get("source") or "")
         if key:
-            import valsrc
             return jsonify(valsrc.test(key))
         return jsonify(datasource.test())
     except Exception as e:

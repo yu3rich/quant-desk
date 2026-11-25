@@ -48,9 +48,10 @@
 
 ## 注意
 
-`app.py` 顶部 import 了白名单外的模块（mlmodel / datasource / bulkdata / pipeline /
-scheduler / emtai / listing / capital / stockview / valsrc）。Chaquopy 环境里这些模块
-缺失时 `import app` 会直接失败。上真机前需要二选一：
-1. 给 app.py 加可裁剪的条件导入（推荐，改根目录文件，桌面版不受影响）；或
-2. 把这些模块的"纯函数子集"扩进白名单（要逐个核对它们的依赖）。
-此为当前脚手架最大的未验证项，见 mobile/README.md「未验证清单」。
+`app.py` 顶层的白名单外模块 import（mlmodel / datasource / bulkdata / pipeline /
+scheduler / emtai / listing / capital / stockview / valsrc）已改为条件导入：
+桌面版真实导入行为不变；Chaquopy 环境缺失时降级为 `_MobileStub`（调用即抛
+RuntimeError 提示"手机版未打包"），`import app` 可成功。factors.py / review.py
+对 listing 的 import 同样加了 try/except 降级（无上市信息时全部票视为在市）。
+qdpaths.py 已加入 sync 白名单（多个白名单模块的公共依赖，纯 stdlib）。
+2026-11-25 已通过 `./gradlew assembleDebug` 实机验证打包成功。

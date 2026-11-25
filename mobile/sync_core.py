@@ -28,6 +28,7 @@ PY_MODULES = [
     "screener.py", "spot.py", "universe.py", "histcache.py",
     "emtlink.py", "emtbook.py", "journal.py", "llm.py", "factors.py",
     "portfolio.py", "neutral.py", "review.py",
+    "qdpaths.py",           # 路径层：多个白名单模块的公共依赖（纯 stdlib）
     "app.py",                # Flask 服务入口
     "config.json",           # 默认配置（Chaquopy 会把它打进 python/ 源码目录）
 ]
