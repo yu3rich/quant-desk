@@ -46,7 +46,8 @@ try:
 except Exception:
     pass
 
-from paths import BASE, WEB  # 打包后 BASE = exe 目录；WEB 优先 exe 同级，回落包内资源
+BASE = Path(__file__).resolve().parent
+WEB = BASE / "web"
 # 后验重放结果的小缓存：key → (时间戳, 响应体)
 _REVIEW_CACHE: dict = {}
 # .webmanifest 默认不在 Python 的映射表里，不显式登记会按 text/plain 发出，

@@ -40,7 +40,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from paths import BASE  # 打包后 = exe 目录；开发时 = 项目根
+BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
 UNIVERSE = DATA / "universe.csv"
 INDUSTRY_CSV = DATA / "industry.csv"

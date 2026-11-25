@@ -55,6 +55,6 @@ test("后端：默认只监听本机，--lan 才放开", () => {
   assert.match(py, /cfg\(\)\.get\("host"\) or "127\.0\.0\.1"/, "默认回落本机");
   assert.match(py, /add_type\("application\/manifest\+json", "\.webmanifest"\)/,
     ".webmanifest 要显式登记 MIME，否则 Chrome 忽略 manifest");
-  const main = read("main.py");
-  assert.match(main, /bind_host\("--lan" in sys\.argv\)/, "exe 也要支持 --lan");
+  // 打包已下线（exe 不再维护），入口只剩 app.py，--lan 由它自己解析
+  assert.match(py, /bind_host\("--lan" in sys\.argv\)/, "启动参数 --lan 要能放开监听");
 });

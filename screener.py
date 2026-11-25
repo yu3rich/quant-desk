@@ -38,7 +38,7 @@ def _atomic_csv(df, path) -> None:
     df.to_csv(tmp, index=False, encoding="utf-8-sig")
     os.replace(tmp, path)
 
-from paths import BASE  # 打包后 = exe 目录；开发时 = 项目根
+BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
 SCREEN_DIR = DATA / "screen"
 SCREEN_DIR.mkdir(parents=True, exist_ok=True)

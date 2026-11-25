@@ -25,7 +25,7 @@ import screener
 import mlmodel
 import store
 
-from paths import BASE  # 打包后 = exe 目录；开发时 = 项目根
+BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
 TRADE_CAL = DATA / "trade_cal.json"
 LOCK = threading.Lock()

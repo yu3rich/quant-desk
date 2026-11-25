@@ -24,7 +24,7 @@ import os
 import re
 from pathlib import Path
 
-from paths import BASE  # 打包后 = exe 目录；开发时 = 项目根
+BASE = Path(__file__).resolve().parent
 DIR = BASE / "data" / "journal"
 
 SRC = ("manual", "ai", "local")

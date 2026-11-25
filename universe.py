@@ -17,7 +17,7 @@ from pathlib import Path
 
 import requests
 
-from paths import BASE  # 打包后 = exe 目录；开发时 = 项目根
+BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
 DATA.mkdir(parents=True, exist_ok=True)
 UNIVERSE_PATH = DATA / "universe.csv"

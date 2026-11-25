@@ -37,7 +37,7 @@ from pathlib import Path
 import emtlink
 import llm
 
-from paths import BASE  # 打包后 = exe 目录；开发时 = 项目根
+BASE = Path(__file__).resolve().parent
 CFG_PATH = BASE / "data" / "emt_ai.json"
 
 DEFAULT = {"journal": "local", "health": "local", "auto": True}

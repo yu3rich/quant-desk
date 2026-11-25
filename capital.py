@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from paths import BASE  # 打包后 = exe 目录；开发时 = 项目根
+BASE = Path(__file__).resolve().parent
 DATA = BASE / "data"
 CFG_PATH = DATA / "capital.json"
 
