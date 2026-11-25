@@ -35,7 +35,7 @@ import threading
 import time
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
+from paths import BASE  # 打包后 = exe 目录；开发时 = 项目根
 DATA = BASE / "data"
 DATA.mkdir(parents=True, exist_ok=True)
 LISTING_PATH = DATA / "listing.csv"

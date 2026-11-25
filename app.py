@@ -44,8 +44,7 @@ try:
 except Exception:
     pass
 
-BASE = Path(__file__).resolve().parent
-WEB = BASE / "web"
+from paths import BASE, WEB  # 打包后 BASE = exe 目录；WEB 优先 exe 同级，回落包内资源
 # 后验重放结果的小缓存：key → (时间戳, 响应体)
 _REVIEW_CACHE: dict = {}
 app = Flask(__name__, static_folder=None)

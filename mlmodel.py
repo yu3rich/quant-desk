@@ -18,7 +18,7 @@ import pandas as pd
 
 import screener
 
-BASE = Path(__file__).resolve().parent
+from paths import BASE  # 打包后 = exe 目录；开发时 = 项目根
 SCREEN_DIR = BASE / "data" / "screen"
 SCREEN_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_PATH = SCREEN_DIR / "model.txt"

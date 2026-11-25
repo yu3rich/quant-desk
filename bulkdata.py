@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-BASE = Path(__file__).resolve().parent
+from paths import BASE  # 打包后 = exe 目录；开发时 = 项目根
 DATA = BASE / "data"
 CONFIG = BASE / "config.json"
 UNIVERSE = DATA / "universe.csv"
@@ -721,9 +721,17 @@ def _run_parallel(codes: list[str], mode: str, cache_start: str, end: str, worke
     for p in paths:
         try:
             chunk = json.loads(p.read_text(encoding="utf-8"))
+            # 冻结成 exe 后 __file__ 指向临时解压目录、sys.executable 就是 exe 本身：
+            # 再用「脚本路径 + --worker」拉起会变成又启动一个完整服务（端口占用后秒退），
+            # 所以打包态改用参数入口，由 main.py 分派到 worker。
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "--bulkdata-worker",
+                       str(p), mode, cache_start, end]
+            else:
+                cmd = [sys.executable, str(Path(__file__).resolve()), "--worker",
+                       str(p), mode, cache_start, end]
             pr = subprocess.Popen(
-                [sys.executable, str(Path(__file__).resolve()), "--worker",
-                 str(p), mode, cache_start, end],
+                cmd,
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, encoding="utf-8", errors="ignore", bufsize=1,
                 # 子进程 stdout 是管道，Windows 上 Python 不会自动用 UTF-8，
