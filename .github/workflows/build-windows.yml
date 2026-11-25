@@ -40,29 +40,31 @@ jobs:
             packaging/dist/QuantDesk-Setup-*.exe
           if-no-files-found: error
 
-      - name: Push installer to dist branch (for fast SSH fetch)
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          git config user.name "ci-bot"
-          git config user.email "ci-bot@users.noreply.github.com"
-          git fetch origin dist || true
-          git checkout -B dist origin/dist 2>$null; if ($LASTEXITCODE -ne 0) { git checkout -B dist }
-          Copy-Item packaging\dist\QuantDesk-Setup-*.exe .
-          git add QuantDesk-Setup-*.exe
-          git commit -m "dist: windows installer ($env:GITHUB_SHA)"
-          git push -f origin dist
+      # dist 分支同步暂停（与 Release 一起等测试通过后恢复）
+      # - name: Push installer to dist branch (for fast SSH fetch)
+      #   shell: pwsh
+      #   env:
+      #     GH_TOKEN: ${{ github.token }}
+      #   run: |
+      #     git config user.name "ci-bot"
+      #     git config user.email "ci-bot@users.noreply.github.com"
+      #     git fetch origin dist || true
+      #     git checkout -B dist origin/dist 2>$null; if ($LASTEXITCODE -ne 0) { git checkout -B dist }
+      #     Copy-Item packaging\dist\QuantDesk-Setup-*.exe .
+      #     git add QuantDesk-Setup-*.exe
+      #     git commit -m "dist: windows installer ($env:GITHUB_SHA)"
+      #     git push -f origin dist
 
-      - name: Create GitHub Release with installer
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $exe = (Get-ChildItem packaging\dist\QuantDesk-Setup-*.exe | Select-Object -First 1).FullName
-          "QuantDesk Windows 桌面版安装包（PyInstaller + Inno Setup）。系统要求 Windows 10/11 x64。数据目录 %LOCALAPPDATA%\QuantDesk\data" | Out-File -Encoding utf8 notes.txt
-          gh release create $env:GITHUB_REF_NAME $exe --title "QuantDesk $env:GITHUB_REF_NAME" --notes-file notes.txt
-          if ($LASTEXITCODE -ne 0) { gh release upload $env:GITHUB_REF_NAME $exe --clobber }
+      # Release 发布暂停：等用户真机测试通过后再恢复（届时换回 gh release upload）
+      # - name: Create GitHub Release with installer
+      #   shell: pwsh
+      #   env:
+      #     GH_TOKEN: ${{ github.token }}
+      #   run: |
+      #     $exe = (Get-ChildItem packaging\dist\QuantDesk-Setup-*.exe | Select-Object -First 1).FullName
+      #     "QuantDesk Windows 桌面版安装包（PyInstaller + Inno Setup）。系统要求 Windows 10/11 x64。数据目录 %LOCALAPPDATA%\QuantDesk\data" | Out-File -Encoding utf8 notes.txt
+      #     gh release create $env:GITHUB_REF_NAME $exe --title "QuantDesk $env:GITHUB_REF_NAME" --notes-file notes.txt
+      #     if ($LASTEXITCODE -ne 0) { gh release upload $env:GITHUB_REF_NAME $exe --clobber }
 
   apk:
     runs-on: ubuntu-latest
@@ -90,7 +92,9 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
 
-      - name: Upload APK to Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload $GITHUB_REF_NAME app/build/outputs/apk/debug/app-debug.apk --clobber
+      - name: Upload APK as Actions artifact（暂不发布 Release，待用户测试通过）
+        uses: actions/upload-artifact@v4
+        with:
+          name: quantdesk-android
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

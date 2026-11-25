@@ -63,6 +63,10 @@ def start(port: int, data_dir: str, web_dir: str) -> None:
         import app as quantdesk_app  # noqa: 模块导入即可，Flask 对象在 app.app
 
         flask_app = quantdesk_app.app
+        # 关键：把 app.py 的前端目录指向 MainActivity 解包出的真实位置，
+        # 否则 WEB = 源码目录/web 不存在 → 首页与 /static 全部 404
+        from pathlib import Path
+        quantdesk_app.WEB = Path(web_dir).resolve()
         flask_app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 
         def _run() -> None:
