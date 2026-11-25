@@ -25,6 +25,10 @@ config.local.json
 .env.*
 secrets.json
 
+# ---------- 前端测试依赖（jsdom 等，装完即可复现，不入库） ----------
+node_modules/
+.pnpm-store/
+
 # ---------- Python 环境 ----------
 .venv/
 venv/
