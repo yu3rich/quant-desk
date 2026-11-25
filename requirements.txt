@@ -20,7 +20,8 @@ akshare==1.20.38
 baostock==0.9.4
 # 通达信 TCP 通道（不走 HTTP 代理，东财/腾讯被代理挡住时的独立冗余）
 # 只用到 tdxpy.hq，不装 mootdx —— 后者会强制 httpx<0.26，与其他包冲突
-tdxpy>=0.6.8
+# 注：PyPI 上 tdxpy 最高 0.2.7（0.6.8 从未发布过，旧声明是错的），API 兼容 tdxpy.hq.TdxHq_API
+tdxpy>=0.2.7
 
 # ---- 技术指标 ----
 ta==0.11.0
