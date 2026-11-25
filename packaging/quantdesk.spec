@@ -45,7 +45,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,               # 桌面程序，不弹黑窗
-    icon=str(ROOT / "web" / "icon.svg") if False else None,  # PyInstaller 只收 .ico；有 ico 后填路径
+    icon=str(ROOT / "packaging" / "quantdesk.ico"),
 )
 
 worker = EXE(
