@@ -32,10 +32,12 @@ import os
 import threading
 from pathlib import Path
 
+import qdpaths
+
 import requests
 
 BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+DATA = qdpaths.data_path()
 EXTRA = DATA / "extra"
 SOURCES = DATA / "sources.json"
 BASIC_CSV = EXTRA / "daily_basic.csv"

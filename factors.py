@@ -29,6 +29,8 @@ import datetime as dt
 import json
 from pathlib import Path
 
+import qdpaths
+
 import numpy as np
 import pandas as pd
 
@@ -38,7 +40,7 @@ import screener
 import store
 
 BASE = Path(__file__).resolve().parent
-CACHE_PATH = BASE / "data" / "screen" / "factor_checkup.json"
+CACHE_PATH = qdpaths.data_path("screen", "factor_checkup.json")
 DECILES = 10
 
 

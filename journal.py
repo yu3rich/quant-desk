@@ -24,8 +24,10 @@ import os
 import re
 from pathlib import Path
 
+import qdpaths
+
 BASE = Path(__file__).resolve().parent
-DIR = BASE / "data" / "journal"
+DIR = qdpaths.data_path("journal")
 
 SRC = ("manual", "ai", "local")
 SRC_LABEL = {"manual": "手写", "ai": "AI 稿", "local": "本地模板"}

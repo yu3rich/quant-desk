@@ -60,10 +60,12 @@ import threading
 import uuid
 from pathlib import Path
 
+import qdpaths
+
 import journal as journal_md
 
 BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+DATA = qdpaths.data_path()
 CFG_PATH = DATA / "emt.json"
 LEDGER = DATA / "ledger"
 RAW_DIR = LEDGER / "_raw"

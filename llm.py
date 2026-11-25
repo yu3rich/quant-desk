@@ -20,10 +20,12 @@ import re
 import time
 from pathlib import Path
 
+import qdpaths
+
 import requests
 
 BASE = Path(__file__).resolve().parent
-CONFIG_PATH = BASE / "data" / "llm.json"
+CONFIG_PATH = qdpaths.data_path("llm.json")
 
 DEFAULT = {"enabled": False, "base_url": "", "api_key": "", "model": "",
            "temperature": 0.2, "timeout": 25, "max_tokens": 0,
@@ -475,7 +477,7 @@ def rerank(candidates: list[dict], as_of: str = "", horizon: int | None = None,
 
 
 # ---- 重排结果持久化：刷新页面 / 重启服务后仍可恢复，不必重烧 token ----
-LAST_PATH = BASE / "data" / "screen" / "llm_last.json"
+LAST_PATH = qdpaths.data_path("screen", "llm_last.json")
 
 
 def save_last(result: dict, as_of: str = "") -> None:

@@ -13,13 +13,15 @@ import json
 import math
 from pathlib import Path
 
+import qdpaths
+
 import numpy as np
 import pandas as pd
 
 import screener
 
 BASE = Path(__file__).resolve().parent
-SCREEN_DIR = BASE / "data" / "screen"
+SCREEN_DIR = qdpaths.data_path("screen")
 SCREEN_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_PATH = SCREEN_DIR / "model.txt"
 MODEL_META = SCREEN_DIR / "model.json"

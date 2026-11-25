@@ -20,6 +20,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+import qdpaths
+
 import numpy as np
 import pandas as pd
 
@@ -253,7 +255,7 @@ def _ref_price(code: str) -> float | None:
     """从全 A 名单取最新真实价，用于把后复权序列等比回缩到真实量级。"""
     try:
         import csv
-        p = BASE / "data" / "universe.csv"
+        p = qdpaths.data_path("universe.csv")
         with p.open("r", encoding="utf-8-sig", newline="") as f:
             for r in csv.DictReader(f):
                 if r.get("code") == code:

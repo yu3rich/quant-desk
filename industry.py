@@ -38,10 +38,12 @@ import threading
 import time
 from pathlib import Path
 
+import qdpaths
+
 import pandas as pd
 
 BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+DATA = qdpaths.data_path()
 UNIVERSE = DATA / "universe.csv"
 INDUSTRY_CSV = DATA / "industry.csv"
 META_JSON = DATA / "industry.json"

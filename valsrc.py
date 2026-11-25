@@ -28,10 +28,12 @@ import math
 import time
 from pathlib import Path
 
+import qdpaths
+
 import requests
 
 BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+DATA = qdpaths.data_path()
 CFG_PATH = DATA / "valsrc.json"
 
 COVER_OK = 0.95      # 覆盖率达到这个比例才算「全市场」

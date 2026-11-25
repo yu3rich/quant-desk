@@ -28,11 +28,13 @@ import threading
 import time
 from pathlib import Path
 
+import qdpaths
+
 import numpy as np
 import pandas as pd
 
 BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+DATA = qdpaths.data_path()
 CONFIG = BASE / "config.json"
 UNIVERSE = DATA / "universe.csv"
 # 最近一次行情任务用的数据源（降级/限流提示要跨进程重启保留）
@@ -721,9 +723,16 @@ def _run_parallel(codes: list[str], mode: str, cache_start: str, end: str, worke
     for p in paths:
         try:
             chunk = json.loads(p.read_text(encoding="utf-8"))
+            if getattr(sys, "frozen", False):
+                # 冻结模式：没有独立 python.exe，用打包时附带的 qdworker.exe
+                # （同一个 spec 的第二个入口，只执行 bulkdata._worker_main）
+                worker_cmd = [str(Path(sys.executable).parent / "qdworker.exe"),
+                              "--worker", str(p), mode, cache_start, end]
+            else:
+                worker_cmd = [sys.executable, str(Path(__file__).resolve()), "--worker",
+                              str(p), mode, cache_start, end]
             pr = subprocess.Popen(
-                [sys.executable, str(Path(__file__).resolve()), "--worker",
-                 str(p), mode, cache_start, end],
+                worker_cmd,
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, encoding="utf-8", errors="ignore", bufsize=1,
                 # 子进程 stdout 是管道，Windows 上 Python 不会自动用 UTF-8，

@@ -35,8 +35,10 @@ import threading
 import time
 from pathlib import Path
 
+import qdpaths
+
 BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+DATA = qdpaths.data_path()
 DATA.mkdir(parents=True, exist_ok=True)
 LISTING_PATH = DATA / "listing.csv"
 FIELDS = ["code", "name", "ipo_date", "out_date", "status", "type", "market", "updated"]

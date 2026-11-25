@@ -17,12 +17,14 @@ import os
 import re
 from pathlib import Path
 
+import qdpaths
+
 import requests
 
 import store
 
 BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+DATA = qdpaths.data_path()
 DATA.mkdir(parents=True, exist_ok=True)
 WATCH_PATH = DATA / "watchlist.json"
 NAMES_PATH = DATA / "names.json"

@@ -34,11 +34,13 @@ import threading
 import time
 from pathlib import Path
 
+import qdpaths
+
 import emtlink
 import llm
 
 BASE = Path(__file__).resolve().parent
-CFG_PATH = BASE / "data" / "emt_ai.json"
+CFG_PATH = qdpaths.data_path("emt_ai.json")
 
 DEFAULT = {"journal": "local", "health": "local", "auto": True}
 MODES = ("local", "ai")

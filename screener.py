@@ -21,6 +21,8 @@ import math
 import os
 from pathlib import Path
 
+import qdpaths
+
 import numpy as np
 import pandas as pd
 
@@ -39,7 +41,7 @@ def _atomic_csv(df, path) -> None:
     os.replace(tmp, path)
 
 BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+DATA = qdpaths.data_path()
 SCREEN_DIR = DATA / "screen"
 SCREEN_DIR.mkdir(parents=True, exist_ok=True)
 UNIVERSE_PATH = DATA / "universe.csv"

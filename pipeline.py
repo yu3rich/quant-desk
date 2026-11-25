@@ -21,12 +21,14 @@ import threading
 import time
 from pathlib import Path
 
+import qdpaths
+
 import screener
 import mlmodel
 import store
 
 BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+DATA = qdpaths.data_path()
 TRADE_CAL = DATA / "trade_cal.json"
 LOCK = threading.Lock()
 

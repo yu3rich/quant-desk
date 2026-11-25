@@ -21,8 +21,10 @@ import json
 import time
 from pathlib import Path
 
+import qdpaths
+
 BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+DATA = qdpaths.data_path()
 DATA.mkdir(parents=True, exist_ok=True)
 SPOT_CSV = DATA / "spot.csv"
 SPOT_META = DATA / "spot.json"

@@ -23,8 +23,10 @@ import threading
 import time
 from pathlib import Path
 
+import qdpaths
+
 BASE = Path(__file__).resolve().parent
-CFG_PATH = BASE / "data" / "scheduler.json"
+CFG_PATH = qdpaths.data_path("scheduler.json")
 
 DEFAULT = {
     "enabled": True,

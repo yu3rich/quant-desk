@@ -26,8 +26,10 @@ import json
 import math
 from pathlib import Path
 
+import qdpaths
+
 BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+DATA = qdpaths.data_path()
 CFG_PATH = DATA / "portfolio.json"
 
 DEFAULTS = {"mode": "equal", "max_w": 0.12, "ind_cap": 0.30,
