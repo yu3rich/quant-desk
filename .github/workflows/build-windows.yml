@@ -63,3 +63,29 @@ jobs:
           "QuantDesk Windows 桌面版安装包（PyInstaller + Inno Setup）。系统要求 Windows 10/11 x64。数据目录 %LOCALAPPDATA%\QuantDesk\data" | Out-File -Encoding utf8 notes.txt
           gh release create $env:GITHUB_REF_NAME $exe --title "QuantDesk $env:GITHUB_REF_NAME" --notes-file notes.txt --clobber
           if ($LASTEXITCODE -ne 0) { gh release upload $env:GITHUB_REF_NAME $exe --clobber }
+
+  apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    needs: build           # 等 Windows job 先创建 Release
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build APK (debug)
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload $GITHUB_REF_NAME app/build/outputs/apk/debug/app-debug.apk --clobber
