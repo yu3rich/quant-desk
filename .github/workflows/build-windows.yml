@@ -40,20 +40,20 @@ jobs:
             packaging/dist/QuantDesk-Setup-*.exe
           if-no-files-found: error
 
-      # dist 分支同步暂停（与 Release 一起等测试通过后恢复）
-      # - name: Push installer to dist branch (for fast SSH fetch)
-      #   shell: pwsh
-      #   env:
-      #     GH_TOKEN: ${{ github.token }}
-      #   run: |
-      #     git config user.name "ci-bot"
-      #     git config user.email "ci-bot@users.noreply.github.com"
-      #     git fetch origin dist || true
-      #     git checkout -B dist origin/dist 2>$null; if ($LASTEXITCODE -ne 0) { git checkout -B dist }
-      #     Copy-Item packaging\dist\QuantDesk-Setup-*.exe .
-      #     git add QuantDesk-Setup-*.exe
-      #     git commit -m "dist: windows installer ($env:GITHUB_SHA)"
-      #     git push -f origin dist
+      # 产物经 dist 分支分发（raw 链接免登录可下；Release 发布仍暂停）
+      - name: Push artifacts to dist branch
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git fetch origin dist || true
+          git checkout -B dist origin/dist 2>$null; if ($LASTEXITCODE -ne 0) { git checkout -B dist }
+          Copy-Item packaging\dist\QuantDesk-Setup-*.exe .
+          git add QuantDesk-Setup-*.exe
+          git commit -m "dist: windows installer ($env:GITHUB_SHA)"
+          git push -f origin dist
 
       # Release 发布暂停：等用户真机测试通过后再恢复（届时换回 gh release upload）
       # - name: Create GitHub Release with installer
@@ -92,9 +92,17 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
 
-      - name: Upload APK as Actions artifact（暂不发布 Release，待用户测试通过）
-        uses: actions/upload-artifact@v4
-        with:
-          name: quantdesk-android
-          path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
+      - name: Push APK to dist branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd $GITHUB_WORKSPACE
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git fetch origin dist || true
+          git checkout -B dist origin/dist
+          cp mobile/app/build/outputs/apk/debug/app-debug.apk .
+          git add app-debug.apk
+          git commit -m "dist: android apk ($GITHUB_SHA)"
+          git push -f origin dist
