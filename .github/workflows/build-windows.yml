@@ -101,7 +101,7 @@ jobs:
           git config user.name "ci-bot"
           git config user.email "ci-bot@users.noreply.github.com"
           git fetch origin dist || true
-          git checkout -B dist origin/dist
+          git checkout -f -B dist origin/dist
           cp mobile/app/build/outputs/apk/debug/app-debug.apk .
           git add app-debug.apk
           git commit -m "dist: android apk ($GITHUB_SHA)"

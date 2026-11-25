@@ -76,3 +76,5 @@ logs/
 
 # ---------- 本地根目录 .genie 标记 ----------
 .wbapp_*.genie
+mobile/.gradle/
+mobile/build/
