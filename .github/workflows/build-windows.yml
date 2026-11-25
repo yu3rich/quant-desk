@@ -37,3 +37,17 @@ jobs:
           path: |
             packaging/dist/QuantDesk-Setup-*.exe
           if-no-files-found: error
+
+      - name: Push installer to dist branch (for fast SSH fetch)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git fetch origin dist || true
+          git checkout -B dist origin/dist 2>$null; if ($LASTEXITCODE -ne 0) { git checkout -B dist }
+          Copy-Item packaging\dist\QuantDesk-Setup-*.exe .
+          git add QuantDesk-Setup-*.exe
+          git commit -m "dist: windows installer ($env:GITHUB_SHA)"
+          git push -f origin dist
