@@ -5,7 +5,9 @@ from __future__ import annotations
 import datetime as dt
 import json
 import mimetypes
+import os
 import socket
+import subprocess
 import sys
 import time
 import traceback
@@ -13,7 +15,7 @@ from importlib import metadata
 from pathlib import Path
 
 import pandas as pd
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import HTTPException
 
 import quant
@@ -38,6 +40,7 @@ import journal
 import listing
 import factors
 import portfolio
+import datapack
 import capital
 import stockview
 
@@ -978,6 +981,76 @@ def sources_fetch():
 # --------------------------------------------------------------------------
 # 数据中枢：统一配置 / 统一更新 / 更新记录（各页快捷仍保留，记录汇入此处）
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# 行情数据包：导出 / 导入
+# --------------------------------------------------------------------------
+# 只打包 bars + bar_meta：这是唯一需要别人花一两个小时从数据源重拉的东西。
+# 账本、日记、选股记录、LLM 辩护都在同一个 quant.db 里，所以绝不能整库拷。
+PACK_DIR = Path(__file__).resolve().parent / "data" / "packs"
+
+
+@app.route("/api/data/pack/status")
+def pack_status():
+    st = datapack.status()
+    files = []
+    try:
+        for f in sorted(PACK_DIR.glob("bars_*.zip"), key=lambda x: x.stat().st_mtime, reverse=True)[:5]:
+            files.append({"name": f.name, "size": f.stat().st_size,
+                          "at": dt.datetime.fromtimestamp(f.stat().st_mtime).strftime("%m-%d %H:%M")})
+    except Exception:
+        pass
+    st["files"] = files
+    try:
+        st["db_size"] = Path(__file__).resolve().parent.joinpath("data", "quant.db").stat().st_size
+    except Exception:
+        st["db_size"] = 0
+    return jsonify(st)
+
+
+@app.route("/api/data/pack/export", methods=["POST"])
+def pack_export():
+    b = request.get_json(silent=True) or {}
+    since = str(b.get("since") or "").strip()
+    if since in ("", "all", "full", "0"):
+        since = None
+    elif len(since) != 10 or since[4] != "-":
+        return jsonify({"ok": False, "error": "since 需为 YYYY-MM-DD，或留空表示全量"})
+    return jsonify(datapack.run_export_async(since))
+
+
+@app.route("/api/data/pack/download")
+def pack_download():
+    st = datapack.status()
+    f = Path(st.get("file") or "")
+    if not (f.exists() and f.suffix == ".zip"):
+        cands = sorted(PACK_DIR.glob("bars_*.zip"), key=lambda x: x.stat().st_mtime, reverse=True)
+        if not cands:
+            return jsonify({"ok": False, "error": "还没有导出过行情包"})
+        f = cands[0]
+    return send_file(str(f), as_attachment=True, download_name=f.name,
+                     mimetype="application/zip")
+
+
+@app.route("/api/data/pack/import", methods=["POST"])
+def pack_import():
+    up = request.files.get("file")
+    if not up or not up.filename:
+        return jsonify({"ok": False, "error": "没有收到文件"})
+    if not up.filename.lower().endswith(".zip"):
+        return jsonify({"ok": False, "error": "请上传 .zip 行情包"})
+    PACK_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = PACK_DIR / ("_upload_%s.zip" % time.strftime("%Y%m%d_%H%M%S"))
+    up.save(str(tmp))
+    info = datapack.inspect_pack(tmp)
+    if not info.get("ok"):
+        tmp.unlink(missing_ok=True)
+        return jsonify(info)
+    r = datapack.run_import_async(tmp)
+    if not r.get("ok"):
+        tmp.unlink(missing_ok=True)
+    return jsonify({**r, "manifest": info.get("manifest")})
+
 
 @app.route("/api/data/hub")
 def data_hub():

@@ -572,7 +572,10 @@ function mkRender(r) {
   $("#mkSub").textContent = MK_LABEL[r.period] + " · " +
     (min ? "数据日 " : "截至 ") + (mkDate(r.date) || "—") +
     (r.period === "five" && r.days ? " · 共 " + r.days + " 个交易日" : "") +
-    (min ? "" : " · 前复权");
+    (min ? "" : (r.adjust === "none" ? " · 不复权" : " · 前复权")) +
+    // 走到备用源时要说清楚：新浪只有日线（周/月是本地合成）且不复权，
+    // 否则用户看到除权跳空会以为是数据错了
+    (!min && r.source && r.source !== "腾讯" ? " · 备用源 " + r.source : "");
   $("#mkQuote").innerHTML = mkQuoteHtml(r);
   $$("#mkTabs .mk-tab").forEach((t) => t.classList.toggle("on", t.dataset.period === r.period));
   if (r.period === "intraday" || r.period === "five") mkDrawMinute(r, c);
@@ -2674,6 +2677,11 @@ const SCR = {
   noteBase: "", status: null, detail: new Set(), busy: false, autoTimer: null
 };
 const SCR_PREF_KEY = "quantdesk_screen_prefs_v1";
+// 偏好结构版本：只在需要「作废一次旧值」时递增。
+// v2：模型分改为默认开启 —— 旧偏好里被关掉的状态会让模型完全不参与选股，
+// 而界面上只有一个不显眼的小 pill，结果看起来就像「模型变了」。
+const SCR_PREF_VER_KEY = "quantdesk_screen_prefs_ver";
+const SCR_PREF_VER = 2;
 // 截止日不进偏好：它是一次性查询条件，被记住后会静默把数据截在历史某天，
 // 表现为「数据日一直不更新」，且用户完全看不出是自己设的。
 // 「优先复用本期截面」同理不进偏好：它决定的是性能而不是口径，服务端会校验数据日，
@@ -2710,6 +2718,9 @@ const SCR_PREF_MIGRATE = { scrTopN: [10, 20], scrMaxSymbols: [300, 800] };
 function scrLoadPrefs() {
   try {
     const p = JSON.parse(localStorage.getItem(SCR_PREF_KEY) || "{}");
+    let ver = 0;
+    try { ver = Number(localStorage.getItem(SCR_PREF_VER_KEY) || 0) || 0; } catch (e) { ver = 0; }
+    if (ver < 2) p.scrUseModel = true;
     SCR_PREF_IDS.forEach((id) => {
       const el = document.getElementById(id);
       if (!el || p[id] == null) return;
@@ -2726,6 +2737,7 @@ function scrLoadPrefs() {
     // 旧版本把截止日也存进了偏好：读到直接清掉，否则数据日会一直停在那一天
     const ao = document.getElementById("scrAsOfInput");
     if (ao) ao.value = "";
+    try { localStorage.setItem(SCR_PREF_VER_KEY, String(SCR_PREF_VER)); } catch (e) { /* 忽略 */ }
   } catch (e) { /* 本地偏好损坏时忽略，用默认值 */ }
 }
 function scrSavePrefs() {
@@ -3079,9 +3091,13 @@ async function screenStatus() {
   }
   const d = r.data, m = r.model || {}, l = r.llm || {};
   const mt = (m.meta && m.meta.metrics) || {};
-  $("#chipUniverse").textContent = "全 A " + d.universe_total + " 只";
+  // 顶栏胶囊统一「文字 + 加粗数值」：这里原来用 textContent 不带 <b>，
+  // 与「已缓存 5,642 只」并排时数字一粗一细，看起来像字号不一样。
+  $("#chipUniverse").innerHTML = "全 A <b>" + d.universe_total + "</b> 只";
   $("#chipCached").innerHTML = "已缓存 <b>" + d.cached_total + "</b> 只";
-  $("#chipModel").textContent = m.trained ? ("模型 " + m.engine + " · IC " + scrFmt(mt.ic, 3)) : "模型 未训练";
+  $("#chipModel").innerHTML = m.trained
+    ? ("模型 " + m.engine + " · IC <b>" + scrFmt(mt.ic, 3) + "</b>")
+    : "模型 未训练";
   $("#chipModel").className = "chip " + (m.trained ? "good" : "warn");
   const llmOn = l.enabled && l.configured;
   SCR.llmReady = !!llmOn;
@@ -5513,9 +5529,142 @@ async function hubAuxLoad() {
     '<div class="k">状态</div><div class="v">读取失败：' + esc((c && c.error) || "未知错误") + "</div>";
 }
 
+/* ---------------- 行情包：导出 / 导入 ---------------- */
+/* 换机器时唯一值得搬的是 K 线：981 万根自己拉要一两个小时，名单/估值都是分钟级。
+   导出在后端线程里跑（340MB 写盘几十秒），导入用 XHR 才拿得到上传百分比。 */
+const PACK = { last: null, timer: null, autoDown: false };
+
+function packSince() {
+  const y = Number(($("#packRange") || {}).value || 0);
+  if (!y) return "";
+  const d = new Date();
+  d.setFullYear(d.getFullYear() - y);
+  const p = (n) => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+}
+
+function packFmtSize(n) {
+  n = Number(n) || 0;
+  return n >= 1e9 ? (n / 1e9).toFixed(1) + " GB" : (n / 1e6).toFixed(0) + " MB";
+}
+
+function packRender(s) {
+  PACK.last = s || {};
+  const bar = $("#packProg"), fi = $("#packFi"), msg = $("#packMsg"), info = $("#packInfo");
+  const down = $("#lnkPackDown");
+  if (!bar) return;
+  const pct = Math.max(0, Math.min(100, Number(s.pct) || 0));
+  bar.hidden = !s.running && !pct;
+  fi.style.width = pct + "%";
+  if (s.running) {
+    msg.textContent = (s.phase ? s.phase + " · " : "") + (s.message || "处理中") +
+      (s.total ? "（" + Number(s.done || 0).toLocaleString("zh-CN") + " / " +
+        Number(s.total).toLocaleString("zh-CN") + "）" : "");
+  } else if (s.message) {
+    msg.textContent = s.message;
+  }
+  if (info) {
+    const f = (s.files || [])[0];
+    info.textContent = "库 " + packFmtSize(s.db_size) +
+      (f ? " · 最近包 " + f.at + " · " + packFmtSize(f.size) : " · 还没有导出过");
+  }
+  if (down) {
+    const f = (s.files || [])[0];
+    down.hidden = !(f || s.file);
+    if (f) down.setAttribute("download", f.name);
+  }
+  if ($("#btnPackExport")) $("#btnPackExport").disabled = !!s.running;
+  if ($("#btnPackImport")) $("#btnPackImport").disabled = !!s.running;
+}
+
+/* 导出完成后自动把包拉下来：包在服务端磁盘上，浏览器不点一次下载是拿不到的。
+   用临时 <a download> 而不是 location.href，后者会把当前页面导航走。 */
+function packAutoDownload() {
+  const f = (PACK.last && (PACK.last.files || [])[0]) || {};
+  const a = document.createElement("a");
+  a.href = "/api/data/pack/download?ts=" + Date.now();
+  a.download = f.name || "";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => a.remove(), 0);
+}
+
+async function packLoad() {
+  try {
+    const s = await api("/api/data/pack/status");
+    packRender(s);
+    return s;
+  } catch (e) { return null; }
+}
+
+function packPoll() {
+  clearTimeout(PACK.timer);
+  PACK.timer = setTimeout(async () => {
+    const s = await packLoad();
+    if (s && s.running) { packPoll(); return; }
+    sysTaskEnd("pack");
+    if (s && PACK.autoDown && s.kind === "export" && s.result) {
+      PACK.autoDown = false;
+      packAutoDownload();
+      toast("导出完成，已开始下载");
+    }
+  }, 1500);
+}
+
+async function packExport() {
+  const r = await post("/api/data/pack/export", { since: packSince() });
+  if (!r.ok) { toast(r.error || "导出失败", "err"); return; }
+  PACK.autoDown = true;
+  sysTaskStart("pack", "导出行情包");
+  toast("开始导出，完成后自动下载");
+  packPoll();
+}
+
+function packImport(file) {
+  if (!file) return;
+  if (!/\.zip$/i.test(file.name)) { toast("请选择 .zip 行情包", "err"); return; }
+  if (!confirm("导入会用包内的 K 线覆盖同代码同日期的记录；\n账本、日记、选股记录不受影响。\n\n继续？")) return;
+  const msg = $("#packMsg"), bar = $("#packProg"), fi = $("#packFi");
+  bar.hidden = false;
+  fi.style.width = "0%";
+  msg.textContent = "上传中…";
+  sysTaskStart("pack", "导入行情包");
+  const fd = new FormData();
+  fd.append("file", file);
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/data/pack/import");
+  xhr.upload.onprogress = (e) => {
+    if (!e.lengthComputable) return;
+    const p = Math.round(e.loaded * 100 / e.total);
+    fi.style.width = p + "%";
+    msg.textContent = "上传中 " + p + "% · " + packFmtSize(e.loaded) + " / " + packFmtSize(e.total);
+  };
+  xhr.onload = () => {
+    let r = {};
+    try { r = JSON.parse(xhr.responseText || "{}"); } catch (e) { r = {}; }
+    if (!r.ok) {
+      sysTaskEnd("pack");
+      msg.textContent = r.error || "导入失败";
+      toast(r.error || "导入失败", "err");
+      packLoad();
+      return;
+    }
+    msg.textContent = "已开始合并，进度见上方";
+    packPoll();
+  };
+  xhr.onerror = () => {
+    sysTaskEnd("pack");
+    msg.textContent = "上传失败：网络中断";
+    toast("上传失败", "err");
+  };
+  xhr.send(fd);
+}
+
 async function hubLoad() {
   const d = await api("/api/data/hub");
   hubRender(d);
+  packLoad();          // 行情包状态：导出完成后要把「下载」链接亮出来
   return d;
 }
 
@@ -7247,6 +7396,13 @@ function bind() {
   if ($("#btnHubSel")) $("#btnHubSel").addEventListener("click", (e) => hubRun("sel", e.currentTarget));
   if ($("#btnHubFull")) $("#btnHubFull").addEventListener("click", (e) => hubRun("full", e.currentTarget));
   if ($("#btnHubWorkers")) $("#btnHubWorkers").addEventListener("click", (e) => hubWorkersSave(e.currentTarget));
+  if ($("#btnPackExport")) $("#btnPackExport").addEventListener("click", packExport);
+  if ($("#btnPackImport")) $("#btnPackImport").addEventListener("click", () => $("#packFile").click());
+  if ($("#packFile")) $("#packFile").addEventListener("change", (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";          // 清空才能重复选同一个文件
+    if (f) packImport(f);
+  });
   if ($("#hubSched")) $("#hubSched").addEventListener("change", hubSchedSave);
   if ($("#hubTime")) $("#hubTime").addEventListener("change", hubSchedSave);
   if ($("#btnHubRuns")) $("#btnHubRuns").addEventListener("click", () => runsLoad(true));

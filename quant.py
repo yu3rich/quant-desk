@@ -156,7 +156,9 @@ def _fetch_tencent(code: str, start: str, end: str) -> pd.DataFrame:
     hdr = {"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"}
     rows = []
     for a, b in segs:
-        url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+        # 老路径 fqkline 自 2026-11-26 起被腾讯 WAF 拦成 501，换同域名的
+        # newfqkline：参数与返回结构一致，仍然前复权。别再改回去。
+        url = ("https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get"
                f"?param={key},day,{a},{b},800,qfq")
         try:
             r = requests.get(url, headers=hdr, timeout=20)

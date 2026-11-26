@@ -120,8 +120,13 @@ a:hover{text-decoration:underline}
 .crumb-group{font-size:11.5px;color:var(--ink3);font-weight:600;letter-spacing:.04em}
 .crumb-sep{color:var(--ink3);font-size:12px;opacity:.6}
 .topbar h2{font-size:18px;margin:0;letter-spacing:-.01em}
-.chips{display:flex;gap:6px;flex-wrap:wrap}
-.chip{background:#fff;border:1px solid var(--line);border-radius:20px;padding:3px 10px;
+.chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+/* 胶囊统一：固定行高 + inline-flex 垂直居中。
+   原来靠 padding 撑高度，span 与 button 的 UA 行高不同，顶栏里会差 1~2px；
+   数字有的包 <b> 有的不包，粗细不一致又会被看成「大小不一」。 */
+.chip{display:inline-flex;align-items:center;justify-content:center;
+  height:22px;box-sizing:border-box;line-height:1;
+  background:#fff;border:1px solid var(--line);border-radius:11px;padding:0 10px;
   font-size:11px;color:var(--ink2);white-space:nowrap}
 .chip b{color:var(--ink);font-weight:650}
 .chip.good{background:#eaf7f1;border-color:#cdeadd;color:#0f7d56}
@@ -1008,7 +1013,7 @@ summary:focus-visible,a:focus-visible{outline:2px solid var(--blue);outline-offs
   .chip.q{margin-left:auto}
   .crumb-group,.crumb-sep{display:none}
   .chips{gap:5px}
-  .chip{font-size:10px;padding:2px 8px}
+  .chip{font-size:10px;padding:0 8px;height:20px}
   .bt-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
   .bt-f1,.bt-f2{flex:none;min-width:0}
   .bt-params{grid-column:1/-1}
@@ -1274,6 +1279,18 @@ tr.rowlink:hover td{background:#f7f9fc}
 /* 上市名单 / 资金流的标签比数据链四段长得多（「退市股有行情」69px），
    沿用 pipe-kv 的 44px 固定列会把标签压进值列。这里按最长标签自适应，
    并允许折行，值列始终 minmax(0,1fr) 不被撑破。 */
+/* 行情包：导出/导入。进度条独立于 .scr-bar（那边是 nm/tr/vl 三段结构） */
+.pack-box{margin-top:12px;padding-top:12px;border-top:1px dashed var(--line)}
+.pack-head{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.pack-head b{font-size:12px;color:var(--ink)}
+.pack-bar{height:6px;border-radius:4px;background:#eef1f5;overflow:hidden;margin-top:8px}
+.pack-bar .fi{display:block;height:100%;width:0;background:var(--blue);border-radius:4px;
+  transition:width .2s ease}
+.pack-box .ep-sel--mini{width:236px}
+.pack-dir{margin-top:8px}
+.pack-dir .hint{flex:0 0 auto}
+.pack-dir input[type=text]{flex:1 1 260px;min-width:0}
+.pack-dir .check{flex:0 0 auto;white-space:nowrap}
 .hub-kv{grid-template-columns:minmax(76px,max-content) minmax(0,1fr);gap:6px 12px;margin:0}
 .hub-kv .k{white-space:normal;line-height:1.35}
 .pipe-flag{font-size:11px;font-weight:500;color:var(--ink3);margin-left:6px;white-space:nowrap}

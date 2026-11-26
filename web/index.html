@@ -843,6 +843,28 @@
             <button class="btn sec sm" id="btnHubWorkers">保存</button>
             <span class="hint">建议 6；超过 6 会互踢登录。仅影响行情增量下载。</span>
           </div>
+
+          <!-- 行情包：换机器时唯一值得搬的东西。981 万根 K 线自己拉要一两个小时，
+               其余名单/估值都是分钟级，没必要传；账本与日记更不能混进来。 -->
+          <div class="pack-box">
+            <div class="pack-head">
+              <b>行情包</b>
+              <span class="hint" id="packInfo">只含 K 线，不含账本 / 日记 / 选股记录</span>
+            </div>
+            <div class="inline">
+              <select class="mini-sel" id="packRange" aria-label="导出时间范围">
+                <option value="0" selected>全量 2018 起 · 约 340MB</option>
+                <option value="3">近 3 年 · 约 137MB</option>
+                <option value="1">近 1 年 · 约 47MB</option>
+              </select>
+              <button class="btn sm" id="btnPackExport">导出</button>
+              <button class="btn sec sm" id="btnPackImport">导入…</button>
+              <a class="btn sec sm" id="lnkPackDown" href="/api/data/pack/download" hidden>下载</a>
+              <input type="file" id="packFile" accept=".zip" hidden>
+            </div>
+            <div class="pack-bar" id="packProg" hidden><span class="fi" id="packFi"></span></div>
+            <p class="hint" id="packMsg">换机器时先导这里，再让新机器自己补当天增量。</p>
+          </div>
           <!-- 更新策略是「数据链」这张卡的一部分，不再单独占一张卡造成割裂 -->
           <p class="caption hub-chain-note">按数据日自动判断要跑哪几段 · 模型不会自动重训<i class="q" tabindex="0" role="button"
             data-tip-name="更新到最新会做什么"

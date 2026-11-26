@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """QuantDesk 内置定时器 · 收盘后自动把数据链推到最新
 
+**默认关闭**：数据更新与选股都已在「待办」里提示，手动点一次即可；再挂一个
+18:10 的班次只会在没人看的时候白跑全市场增量、反复敲数据源。实盘账户的
+盘中刷新与收盘日结是另一套定时器（emtlink.py），不受这里的开关影响。
+
 为什么放在进程内而不是系统计划任务：这套东西只在你开着工作台时才有意义，
 用 Windows 计划任务反而会出现「服务没开 → 任务空跑一遍写坏文件」的坑。
 进程内一个 daemon 线程，随服务启停，配置存在 data/scheduler.json 里，
@@ -27,7 +31,10 @@ BASE = Path(__file__).resolve().parent
 CFG_PATH = BASE / "data" / "scheduler.json"
 
 DEFAULT = {
-    "enabled": True,
+    # 默认关闭：数据更新与选股都已在「待办」里提示，用户手动点一次即可，
+    # 再挂一个 18:10 的班次只会在没人看的时候白跑全市场增量、敲数据源。
+    # 想恢复自动更新，在「选股设置 → 数据准备」里打开即可（配置会落盘）。
+    "enabled": False,
     # 排 18:10 而不是收盘后立刻跑：baostock 日线通常 17:30 后才入库，
     # 15:40 跑出来的增量还是前一日的数据，等于白跑一趟。
     "time": "18:10",
@@ -400,7 +407,8 @@ def _tick():
         # 估值有自己的到点时刻：开快照源时 15:05 就有当日 PE/PB，没必要跟行情一起
         # 等到 18:10（baostock 日线的入库时间）。否则 15:05~18:10 这三小时里，
         # 页面上的估值一直是昨天的，用户还得手动点 —— 而盘中手动点必然失败。
-        if not _val_running and _val_can():
+        # 必须跟总开关联动：关了定时却还偷偷拉估值，等于开关没生效。
+        if not _val_running and cfg.get("enabled") and _val_can():
             _val_running = True
             threading.Thread(target=_val_go, name="sched-val", daemon=True).start()
     except Exception:

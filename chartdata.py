@@ -7,12 +7,14 @@
   - five    五日：最近 5 个交易日的连续分时，横轴按天拼接
   - day/week/month：蜡烛图，前复权（最新价 = 实时价，与分时同口径）
 
-数据全部走腾讯（web.ifzq.gtimg.cn），与回测用的 baostock 后复权缓存相互独立：
+分时/五日/指数走腾讯（web.ifzq.gtimg.cn）；K 线走腾讯前复权，失败时依次退到
+腾讯备域名与新浪日线合成（见 KLINE_SRC）。与回测用的 baostock 后复权缓存相互独立：
 回测要做收益连乘，必须后复权；看图要看着像真的，必须前复权。两套口径不混用。
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import time
 
 import requests
@@ -229,20 +231,37 @@ def five_day(code: str) -> dict:
     return _cache_put("five:" + key, out)
 
 
-def kline(code: str, period: str = "day") -> dict:
-    period = period if period in ("day", "week", "month") else "day"
-    key = key_of(code)
-    ck = "%s:%s" % (period, key)
-    hit = _cache_get(ck)
-    if hit:
-        return hit
-    n = {"day": 620, "week": 320, "month": 200}[period]
-    d = _get("%s/appstock/app/fqkline/get?param=%s,%s,,,%d,qfq" % (BASE, key, period, n),
-             timeout=15)
+# --------------------------------------------------------------------------
+# K 线多源：腾讯（前复权）→ 腾讯备域名（前复权）→ 新浪日线本地合成（不复权）
+# --------------------------------------------------------------------------
+# 2026-11-26 起 web.ifzq.gtimg.cn/appstock/app/fqkline/get 被腾讯 WAF 拦成
+# HTTP 501（跳 waf.tencent.com），日/周/月图全挂。同域名的 newfqkline 路径和
+# ifzq.gtimg.cn 老路径都还正常，所以优先换路径而不是换供应商 —— 口径（前复权、
+# 成交量单位「手」、日期格式）完全一致，不用改任何解析逻辑。
+# 百度股市通（finance.pae.baidu.com）实测对本机 IP 直接 403 "hit risk"，
+# 参数补全、带 Cookie、带浏览器指纹都无效，属于 IP/设备级风控，服务端直连绕不过，
+# 因此没有接进来：加一个必然失败的源只会让每次切周期多等一次超时。
+KLINE_SRC = (
+    ("腾讯", "https://web.ifzq.gtimg.cn/appstock/app/newfqkline/get"),
+    ("腾讯备线", "https://ifzq.gtimg.cn/appstock/app/fqkline/get"),
+)
+SINA_HDR = {**HDR, "Referer": "https://finance.sina.com.cn/"}
+
+
+def _brief(e) -> str:
+    """requests 的异常文本里塞了整条 URL，报给用户时只留结论。"""
+    s = str(e or "")
+    if "501" in s or "Not Implemented" in s:
+        return "HTTP 501（被 WAF 拦截）"
+    if "403" in s:
+        return "HTTP 403（被风控）"
+    return s.split(" for url:")[0][:80] or s[:80]
+
+
+def _tencent_kline(url: str, key: str, period: str, n: int) -> tuple[list, dict]:
+    d = _get("%s?param=%s,%s,,,%d,qfq" % (url, key, period, n), timeout=15)
     node = d.get(key) or {}
     rows = node.get("qfq" + period) or node.get(period) or []
-    meta = _qt_meta(node.get("qt") or d.get("qt"), key)
-
     bars = []
     for r in rows:
         if len(r) < 6:
@@ -253,8 +272,100 @@ def kline(code: str, period: str = "day") -> dict:
             continue
         bars.append({"date": str(r[0]), "open": o, "close": c, "high": h, "low": l,
                      "volume": v})
+    return bars, _qt_meta(node.get("qt") or d.get("qt"), key)
+
+
+def _agg_bars(bars: list, period: str) -> list:
+    """日线聚合成周/月：开=首日开、收=末日收、高低取极值、量求和。
+
+    周按 ISO 周分组（跨年那一周不会被切成两段），月按年月。
+    """
+    out, cur = [], None
+    for b in bars:
+        ds = b["date"]
+        if period == "month":
+            gk = ds[:7]
+        else:
+            try:
+                y, w, _ = dt.date(int(ds[:4]), int(ds[5:7]), int(ds[8:10])).isocalendar()
+                gk = "%04d-W%02d" % (y, w)
+            except Exception:
+                gk = ds[:7]
+        if cur is None or cur["_k"] != gk:
+            if cur:
+                out.append(cur)
+            cur = {"_k": gk, "date": ds, "open": b["open"], "close": b["close"],
+                   "high": b["high"], "low": b["low"], "volume": b["volume"]}
+        else:
+            cur["date"] = ds
+            cur["close"] = b["close"]
+            cur["high"] = max(cur["high"], b["high"])
+            cur["low"] = min(cur["low"], b["low"])
+            cur["volume"] += b["volume"]
+    if cur:
+        out.append(cur)
+    for x in out:
+        x.pop("_k", None)
+    return out
+
+
+def _sina_kline(key: str, period: str, n: int) -> tuple[list, dict]:
+    """新浪日线 → 需要的根数。只有日线接口，周/月在这里聚合。
+
+    成交量新浪给的是「股」，腾讯给的是「手」，统一除以 100。
+    """
+    need = {"day": n + 5, "week": n * 5 + 30, "month": n * 22 + 40}[period]
+    need = min(max(need, 300), 4800)
+    url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+           "CN_MarketData.getKLineData?symbol=%s&scale=240&ma=no&datalen=%d" % (key, need))
+    r = requests.get(url, headers=SINA_HDR, timeout=20)
+    r.raise_for_status()
+    arr = r.json()
+    if not isinstance(arr, list) or not arr:
+        raise RuntimeError("返回空数据")
+    bars = []
+    for x in arr:
+        try:
+            bars.append({"date": str(x["day"])[:10], "open": float(x["open"]),
+                         "close": float(x["close"]), "high": float(x["high"]),
+                         "low": float(x["low"]), "volume": float(x["volume"]) / 100.0})
+        except Exception:
+            continue
+    if period != "day":
+        bars = _agg_bars(bars, period)
+    bars = bars[-n:]
+    pre = bars[-2]["close"] if len(bars) > 1 else None
+    return bars, {"name": "", "pre_close": pre}
+
+
+def kline(code: str, period: str = "day") -> dict:
+    period = period if period in ("day", "week", "month") else "day"
+    key = key_of(code)
+    ck = "%s:%s" % (period, key)
+    hit = _cache_get(ck)
+    if hit:
+        return hit
+    n = {"day": 620, "week": 320, "month": 200}[period]
+    bars, meta, src, adjust, errs = [], {}, "", "qfq", []
+    for name, url in KLINE_SRC:
+        try:
+            b, m = _tencent_kline(url, key, period, n)
+            if b:
+                bars, meta, src = b, m, name
+                break
+        except Exception as e:                       # noqa: BLE001
+            errs.append("%s：%s" % (name, _brief(e)))
     if not bars:
-        raise RuntimeError("该周期没有行情数据（可能是新股或长期停牌）")
+        # 腾讯两条线都挂时用新浪日线自己合成周/月：多一个完全独立的第三方源，
+        # 代价是不复权（除权日会有跳空），所以只在前面全失败时用，并在返回里写明。
+        try:
+            b, m = _sina_kline(key, period, n)
+            if b:
+                bars, meta, src, adjust = b, m, "新浪", "none"
+        except Exception as e:                       # noqa: BLE001
+            errs.append("新浪：%s" % _brief(e))
+    if not bars:
+        raise RuntimeError("K 线接口都不可用（%s）" % "；".join(errs))
 
     # 涨跌幅按前收算，首根没有前收则为 0
     for i, b in enumerate(bars):
@@ -265,7 +376,8 @@ def kline(code: str, period: str = "day") -> dict:
         "period": period, "date": bars[-1]["date"],
         "pre_close": meta["pre_close"], "last": bars[-1]["close"],
         "pct": bars[-1]["pct"], "bars": bars, "count": len(bars),
-        "advice": "前复权，最新价与实时行情一致",
+        "source": src, "adjust": adjust,
+        "advice": "前复权，最新价与实时行情一致" if adjust == "qfq" else "备用源不复权，除权日会有跳空",
     }
     return _cache_put(ck, out)
 
