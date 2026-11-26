@@ -520,8 +520,11 @@ def _sina_batch(codes: list[str]) -> list[dict]:
         code = key[2:] if key[:2] in ("sh", "sz", "bj") else ""
         if len(code) != 6 or not code.isdigit():
             continue
-        price = _f(f[3])
-        if not price:                                        # 停牌/退市：现价 0，不算有效行
+        # 盘前（9:15~9:25 集合竞价前）与停牌时现价是 0，但昨收是有效的价格参考。
+        # 这条通道只做「价格兜底」，退回昨收比整批丢弃更有用；确实停牌的票，
+        # 昨收也就是它的最新成交价。
+        price = _f(f[3]) or _f(f[2])
+        if not price:
             continue
         day = str(f[30] or "").replace("-", "")[:8]
         out.append(_row(code, date=day, name=f[0], price=price))
