@@ -142,3 +142,15 @@ test("手机端输入框字号 16px、按钮有触控高度", () => {
   assert.match(block, /\.btn\.sm\{min-height:36px/);
   assert.match(block, /\.chart\{height:250px\}/, "手机上一张图不该占两屏");
 });
+
+test("抽屉要盖在遮罩之上（.sidebar 自身是层叠上下文）", () => {
+  const css = read("web/style.css");
+  // 这条踩过：.sidebar 带 position:sticky + z-index:40，抽屉的 z-index:60 只在它内部生效，
+  // 结果整棵侧栏排在遮罩(55)下面 —— 抽屉看着发灰、点不动、滑不动。
+  assert.match(css, /\.sidebar\{[^}]*z-index:40/, "侧栏本身有 z-index，会形成层叠上下文");
+  assert.match(css, /\.nav-scrim\{[^}]*z-index:55/, "遮罩层级");
+  assert.match(css, /body\.nav-open \.sidebar\{z-index:70\}/,
+    "打开时要把整栏抬到遮罩之上，否则抽屉被遮罩接住所有点击");
+  const zSide = 70, zScrim = 55;
+  assert.ok(zSide > zScrim, "侧栏层级必须高于遮罩");
+});
