@@ -135,6 +135,10 @@ def detail(code: str, force: bool = False) -> dict:
             "pct": _pct_rank(cols[k], v, f.get("direction") or 0),
         })
 
+    _personas, _consensus = personas({"factors": factors, "valuation": val,
+                                      "pe": basic.get("pe"), "pe_ttm": basic.get("pe_ttm"),
+                                      "pb": basic.get("pb")})
+
     warnings = [w for w in (warn, meta.get("warning") or "") if w]
     if str(hit.get("date") or "") < str(store.data_day() or ""):
         warnings.append("该股最后交易日 %s 落后于全市场数据日 %s，因子按它自己的最后一根 bar 计算"
@@ -158,12 +162,168 @@ def detail(code: str, force: bool = False) -> dict:
         "factors": factors,
         "levels": levels,
         "valuation": val,
+        "personas": _personas,
+        "consensus": _consensus,
         "snapshot": {"as_of": meta.get("as_of") or hit.get("date") or "",
                      "count": count, "scope": meta.get("scope") or "",
                      "generated": meta.get("generated") or "",
                      "warning": meta.get("warning") or ""},
         "warnings": warnings,
     }
+
+
+# ---------------------------------------------------------------------------
+# 多视角评分（结构参考 ai-hedge-fund 的多 agent 汇总）
+#
+# ai-hedge-fund 让「巴菲特 / 格雷厄姆 / 木头姐」等角色各自给出 signal + confidence，
+# 再由组合层按置信度汇总。这里保留那个结构，但每个视角都是**可复现的计算**，
+# 不是 LLM 扮演：分数来自已有的横截面分位，谁都能拿同一份数据复算一遍。
+#
+# 缺数据的视角（质量/成长）如实标成 missing —— 本地没有财务数据，
+# 硬编一个「ROE 代理」等于给结论编依据。
+# ---------------------------------------------------------------------------
+PERSONA_DEFS = (
+    ("value", "价值", "格雷厄姆式", "PE / PB 在同行里的位置：越便宜越有利"),
+    ("trend", "趋势", "欧奈尔式", "中期动量与均线结构是否顺畅"),
+    ("revert", "反转", "均值回归", "短期涨多了反而谨慎（与趋势视角天然对冲）"),
+    ("steady", "稳健", "低波动", "波动率与振幅越小越稳"),
+    ("flow", "量能", "资金关注", "换手与成交额相对自身的变化"),
+    ("quality", "质量", "巴菲特式", "ROE / 毛利率 / 现金流 —— 本地暂无财务数据"),
+)
+
+# 每个视角用哪些因子（key 与 screener.FEATURES 对齐，pct 已按方向调整过）
+PERSONA_FACTORS = {
+    "trend": ("mom20", "mom60", "dist_ma60", "ma_dev"),
+    "revert": ("ret1", "rsi14"),
+    "steady": ("vol20", "vol60", "amp20"),
+    "flow": ("turnover", "amount_ratio", "vol_ratio"),
+}
+
+
+def _band_pos(v, band) -> float | None:
+    """当前值在 [p25, p50, p75] 里的位置（0~100，越低越便宜）。
+
+    只做分段线性插值：估值分布是右偏的，用正态假设反而会低估高估区。
+    """
+    if v is None or not isinstance(band, (list, tuple)) or len(band) != 3:
+        return None
+    lo, mid, hi = [_num(x) for x in band]
+    if lo is None or mid is None or hi is None:
+        return None
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None            # 亏损或负净资产：不参与「贵不贵」的判断
+    if v <= lo:
+        return 0.0 if lo == mid else max(0.0, 25.0 * v / lo)
+    if v <= mid:
+        return 25.0 + 25.0 * (v - lo) / (mid - lo) if mid > lo else 25.0
+    if v <= hi:
+        return 50.0 + 25.0 * (v - mid) / (hi - mid) if hi > mid else 50.0
+    return min(100.0, 75.0 + 25.0 * (v - hi) / hi) if hi > 0 else 100.0
+
+
+def _conf(vals: list[float], n_expected: int) -> int:
+    """置信度：因子越多越可信，彼此越分裂越不可信。"""
+    if not vals:
+        return 0
+    spread = max(vals) - min(vals)
+    base = 45 + 8 * min(len(vals), n_expected)
+    return int(max(25, min(90, round(base - spread * 0.5))))
+
+
+def _signal(score: float) -> str:
+    if score >= 20:
+        return "bullish"
+    if score <= -20:
+        return "bearish"
+    return "neutral"
+
+
+def personas(d: dict) -> tuple[list[dict], dict]:
+    """把一只股票拆成几个「视角」，各给分数/置信度/依据，再按置信度汇总。"""
+    fmap = {f["key"]: f for f in (d.get("factors") or [])}
+    val = d.get("valuation") or {}
+    out: list[dict] = []
+
+    for key, name, school, desc in PERSONA_DEFS:
+        item = {"key": key, "name": name, "school": school, "desc": desc,
+                "score": 0, "confidence": 0, "signal": "neutral",
+                "points": [], "missing": False, "missing_note": ""}
+
+        if key == "value":
+            pe, pb = _num(d.get("pe_ttm") or d.get("pe")), _num(d.get("pb"))
+            pe_pos = _band_pos(pe, val.get("pe_band"))
+            pb_pos = _band_pos(pb, val.get("pb_band"))
+            pos = [x for x in (pe_pos, pb_pos) if x is not None]
+            if not pos:
+                item.update(missing=True,
+                            missing_note="同行估值样本不足，或 PE/PB 为负（亏损 / 负净资产）")
+            else:
+                mean = sum(pos) / len(pos)
+                item["score"] = round((50 - mean) * 2)     # 越便宜越正
+                item["confidence"] = _conf(pos, 2)
+                if pe_pos is not None:
+                    item["points"].append("PE %s 处于同行 %d%% 分位"
+                                          % (_fmt(pe, "", 1), round(pe_pos)))
+                if pb_pos is not None:
+                    item["points"].append("PB %s 处于同行 %d%% 分位"
+                                          % (_fmt(pb, "", 2), round(pb_pos)))
+                if not item["points"]:
+                    item["points"].append("同行 PE/PB 分位可用")
+
+        elif key == "quality":
+            item.update(missing=True,
+                        missing_note="本地没有财务数据（ROE / 毛利率 / 现金流），该视角暂不参与汇总")
+
+        else:
+            keys = PERSONA_FACTORS.get(key, ())
+            vals, used = [], []
+            for k in keys:
+                p = (fmap.get(k) or {}).get("pct")
+                if isinstance(p, (int, float)):
+                    vals.append(float(p))
+                    used.append((k, p))
+            if not vals:
+                item.update(missing=True, missing_note="相关因子缺失")
+            else:
+                mean = sum(vals) / len(vals)
+                # 反转视角与因子方向相反：分位越低（超卖）越看多
+                item["score"] = round((50 - mean) * 2 if key == "revert" else (mean - 50) * 2)
+                item["confidence"] = _conf(vals, len(keys))
+                for k, p in used[:2]:
+                    f = fmap.get(k) or {}
+                    item["points"].append("%s %s（分位 %d）"
+                                          % (f.get("name") or k,
+                                             _fmt(f.get("value"), f.get("unit") or "", 2),
+                                             round(p)))
+
+        item["signal"] = _signal(item["score"]) if not item["missing"] else "unknown"
+        out.append(item)
+
+    avail = [p for p in out if not p["missing"]]
+    if not avail:
+        cons = {"score": 0, "signal": "unknown", "confidence": 0, "agreement": 0,
+                "spread": 0, "available": 0, "total": len(out),
+                "note": "所有视角都缺数据，无法汇总"}
+        return out, cons
+
+    w = sum(p["confidence"] for p in avail) or 1
+    score = round(sum(p["score"] * p["confidence"] for p in avail) / w)
+    same = sum(1 for p in avail if (p["score"] >= 0) == (score >= 0))
+    spread = max(p["score"] for p in avail) - min(p["score"] for p in avail)
+    cons = {
+        "score": score, "signal": _signal(score),
+        "confidence": round(w / len(avail)),
+        "agreement": round(same / len(avail) * 100),
+        "spread": spread, "available": len(avail), "total": len(out),
+        "note": ("%d 个视角一致偏%s，分歧 %d 分"
+                 % (same, "多" if score >= 0 else "空", spread)) if same == len(avail)
+                else ("%d / %d 个视角同向，分歧 %d 分" % (same, len(avail), spread)),
+    }
+    return out, cons
 
 
 SYSTEM_DEBATE = """你是 A 股单股研究的多空辩论主持。只依据输入的当日横截面数据，分别写出多头与空头最强的论据，并给出证据倾向。
@@ -238,8 +398,15 @@ def _digest(d: dict) -> dict:
         "valuation_band": {k: (d.get("valuation") or {}).get(k) for k in
                            ("industry", "peers", "pe", "pb", "pe_band", "pb_band",
                             "price_band_pe", "price_band_pb")},
+        # 多视角评分：让报告能引用「哪个视角看多、哪个看空」，而不是只有一份总分
+        "personas": [{"name": p["name"], "signal": p["signal"], "score": p["score"],
+                      "confidence": p["confidence"],
+                      "point": (p["points"] or [""])[0] if not p["missing"] else p["missing_note"]}
+                     for p in (d.get("personas") or [])],
+        "consensus": d.get("consensus") or {},
         "notes": "pct 是横截面有利分位（0~100，越高越有利）；price 为真实成交价；"
-                 "模型分口径见 score_label；risk/valuation_band 是计算值，不是目标价；缺失值为 null。",
+                 "模型分口径见 score_label；risk/valuation_band 是计算值，不是目标价；缺失值为 null。"
+                 "personas 的 signal 取 bullish/neutral/bearish/unknown，是各视角的计算结论，不是买卖建议。",
     }
 
 

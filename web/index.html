@@ -303,6 +303,16 @@
             <label class="check"><input type="checkbox" id="scrFnExtreme" checked> 极端风险</label>
             <label class="check"><input type="checkbox" id="scrFnLiquidity"> 流动性</label>
             <label class="check"><input type="checkbox" id="scrFnTrend"> 站上 20 日线</label>
+            <!-- 基本面层参考 InStock 的价值筛选：默认关闭，因为 A 股约三成是亏损股，
+                 一开就会一次性剔掉它们，属于明确的风格选择，必须显式选。 -->
+            <label class="sp-funnel-sel" title="保守：剔亏损与极端估值（PE>300 / PB>50 / 市值<10亿）；InStock 口径：0<PE≤20、PB≤10、市值≥20亿">
+              <span>基本面</span>
+              <select id="scrFnVal" class="mini-sel">
+                <option value="off" selected>关闭</option>
+                <option value="loose">保守</option>
+                <option value="instock">InStock 口径</option>
+              </select>
+            </label>
           </div>
         </div>
       </div><!-- /scr-params -->
@@ -402,6 +412,17 @@
               <div class="stk-kpis" id="stkKpis"></div>
               <p class="note" id="stkWarn" hidden></p>
             </div>
+          </div>
+
+          <!-- 多视角评分：结构参考 ai-hedge-fund 的多 agent 汇总，
+               但每个视角都是可复算的横截面分位，不是 LLM 扮演角色 -->
+          <div class="card" id="stkPersonaCard" hidden>
+            <div class="scr-table-head">
+              <div><h3>多视角评分</h3>
+                <p class="cap">五个可计算视角各自给分，按置信度汇总；缺数据的视角如实标出，不编造依据</p></div>
+              <span class="stk-cons" id="stkConsensus"></span>
+            </div>
+            <div class="stk-personas" id="stkPersonas"></div>
           </div>
 
           <!-- AI 解读排在因子明细之前：先给结论与多空对照，再看 24 行因子 -->

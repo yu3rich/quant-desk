@@ -135,6 +135,19 @@ FUNNEL_DEFAULT = {
     "max_vol20": 8.0,       # 20 日波动上限（%）
     "min_turnover": 0.2,    # 换手率下限（%）
     "min_ma_dev": 0.0,      # 相对 20 日线的最小偏离（%）
+    "val": "off",           # 基本面/估值层：off / loose / instock（见 VAL_PRESETS）
+}
+
+# 基本面过滤预设（口径参考 InStock 的「基本面选股」：先剔亏损，再卡 PE / PB / 市值）。
+# 全部遵循漏斗的一贯原则：**缺数据放行**，不因为估值源当天没跑就砍掉整批股票。
+# 注意：A 股约三成是亏损（PE<0），loose 这一档会一次性剔掉它们，属于明确的风格选择，
+# 所以默认关闭，必须在界面上显式选。
+VAL_PRESETS = {
+    "off": {},
+    # 保守：只剔「明显不可用」的——亏损、三位数以上市盈率、极端市净率、微盘
+    "loose": {"val_loss": True, "val_pe_max": 300.0, "val_pb_max": 50.0, "val_mv_min": 10.0},
+    # InStock 价值口径：0 < PE ≤ 20、PB ≤ 10，另加市值下限避免微盘
+    "instock": {"val_loss": True, "val_pe_max": 20.0, "val_pb_max": 10.0, "val_mv_min": 20.0},
 }
 REQUIRED_KEYS = ["mom20", "mom60", "vol20", "rsi14", "ma_dev"]
 INDUSTRY_CAP_DEFAULT = 2
@@ -146,7 +159,7 @@ MODULES = [
     {"key": "model", "name": "LightGBM 排序", "built": True,
      "desc": "时序切分验证 + IC/RankIC/特征重要度，缺依赖自动降级岭回归。"},
     {"key": "funnel", "name": "漏斗过滤", "built": True,
-     "desc": "数据完整性 / 极端风险 / 流动性 / 趋势四层硬筛，逐层公布淘汰数与原因。"},
+     "desc": "数据完整性 / 极端风险 / 流动性 / 趋势 / 基本面五层硬筛，逐层公布淘汰数与原因。"},
     {"key": "industry_cap", "name": "行业约束", "built": True,
      "desc": "单行业入选上限，避免同一板块霸榜把行业暴露伪装成 Alpha。"},
     {"key": "industry_neutral", "name": "行业中性化", "built": True,
@@ -255,7 +268,48 @@ def funnel(df: pd.DataFrame, cfg: dict | None = None,
         note = "已关闭" if not c["trend"] else "缺少均线偏离字段，本层跳过"
     rec("trend", "趋势", before, len(cur), note, c["trend"])
 
-    # 6) 排序取候选池（截断由 select() 做，这里只记录进入排序的数量）
+    # 6) 基本面 / 估值（参考 InStock 的价值筛选）
+    #    放在趋势之后、排序之前：估值是「这只票值不值得看」，属于硬门槛，
+    #    但不该影响打分本身 —— 打分口径保持纯量价，可回测性才不会被破坏。
+    before = len(cur)
+    preset = str(c.get("val") or "off").strip().lower()
+    vp = dict(VAL_PRESETS.get(preset, {}))
+    # 显式传入的单项阈值优先于预设：方便接口层做 A/B，不用再新增一个预设
+    for k in ("val_loss", "val_pe_max", "val_pb_max", "val_mv_min"):
+        if k in c and c[k] is not None:
+            vp[k] = c[k]
+    if preset in ("off", "") or not vp:
+        rec("valuation", "基本面", before, len(cur),
+            "已关闭（可选「保守」剔亏损与极端估值，或「InStock」价值口径）", False)
+    else:
+        pe = (pd.to_numeric(cur["pe_ttm"], errors="coerce") if "pe_ttm" in cur.columns
+              else pd.Series(np.nan, index=cur.index))
+        pb = (pd.to_numeric(cur["pb"], errors="coerce") if "pb" in cur.columns
+              else pd.Series(np.nan, index=cur.index))
+        mv = (pd.to_numeric(cur["total_mv"], errors="coerce") if "total_mv" in cur.columns
+              else pd.Series(np.nan, index=cur.index))
+        keep = pd.Series(True, index=cur.index)
+        bits = []
+        if vp.get("val_loss"):
+            keep &= pe.isna() | (pe >= 0)
+            bits.append("剔除亏损（PE<0）")
+        if vp.get("val_pe_max"):
+            # 负 PE 已在上一档处理；这里只压正的高估值，0 视为缺失不参与
+            keep &= pe.isna() | (pe <= 0) | (pe <= float(vp["val_pe_max"]))
+            bits.append("PE ≤ %g" % float(vp["val_pe_max"]))
+        if vp.get("val_pb_max"):
+            keep &= pb.isna() | (pb <= float(vp["val_pb_max"]))
+            bits.append("PB ≤ %g" % float(vp["val_pb_max"]))
+        if vp.get("val_mv_min"):
+            keep &= mv.isna() | (mv >= float(vp["val_mv_min"]))
+            bits.append("总市值 ≥ %g 亿" % float(vp["val_mv_min"]))
+        unknown = int((pe.isna() | pb.isna() | mv.isna()).sum())
+        cur = cur[keep]
+        rec("valuation", "基本面", before, len(cur),
+            " · ".join(bits) + ("；另有 %d 只估值缺失，按「未知放行」处理" % unknown if unknown else ""),
+            True)
+
+    # 7) 排序取候选池（截断由 select() 做，这里只记录进入排序的数量）
     rec("rank", "进入打分排序", len(cur), len(cur), "按分数降序，随后受 TopN 与行业上限约束", True)
     if not detail or "code" not in df.columns:
         return cur, stages
@@ -264,12 +318,15 @@ def funnel(df: pd.DataFrame, cfg: dict | None = None,
     # 两处各写一份 mask 迟早会不一致，而归因结果一旦错位就完全失去意义。
     remain = set(df["code"].astype(str))
     for key, name in (("quality", "数据完整性"), ("st", "ST 与退市"),
-                      ("extreme", "极端风险"), ("liquidity", "流动性"), ("trend", "趋势")):
+                      ("extreme", "极端风险"), ("liquidity", "流动性"), ("trend", "趋势"),
+                      ("valuation", "基本面")):
         if not remain:
             break
         c2 = {**FUNNEL_DEFAULT, **(cfg or {})}
-        for kk in ("quality", "st", "extreme", "liquidity", "trend"):
+        for kk in ("quality", "st", "extreme", "liquidity", "trend", "valuation"):
             c2[kk] = False
+        # 基本面层不是靠布尔开关，而是靠 c["val"] 预设；重跑时只有它需要恢复原值
+        c2["val"] = (str(c.get("val") or "off") if key == "valuation" else "off")
         c2[key] = True
         try:
             keep, _ = funnel(df[df["code"].astype(str).isin(remain)], c2)
@@ -748,9 +805,9 @@ def base_scores(df: pd.DataFrame, mode: str | None = None) -> pd.Series:
 
 
 def attach_market_cap(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
-    """给当期横截面补总市值（亿元），供「行业+市值」中性化使用。
+    """给当期横截面补总市值（亿元）与 PE/PB，供中性化与「基本面」漏斗层使用。
 
-    只用于**当前**截面的可选中性化；训练集不这么做：本地只有最近一期的估值快照，
+    只用于**当前**截面的计算；训练集不这么做：本地只有最近一期的估值快照，
     拿它回填 2022 年的历史样本属于前视，宁可让训练退化为行业中性。
     返回（补好列的 df, 估值数据日）。
     """
@@ -761,14 +818,20 @@ def attach_market_cap(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
         basic = {}
     if not basic:
         return df, ""
-    vals, dates = [], []
+    mv, pe, pb, dates = [], [], [], []
     for c in df.get("code", []):
         e = basic.get(str(c).zfill(6)) or {}
-        vals.append(e.get("total_mv") if e.get("total_mv") not in ("", None) else None)
+        mv.append(e.get("total_mv") if e.get("total_mv") not in ("", None) else None)
+        # 优先 PE(TTM)：动态市盈率受单季波动影响大，TTM 更适合跨股票比较
+        pe.append(e.get("pe_ttm") if e.get("pe_ttm") not in ("", None) else
+                  (e.get("pe") if e.get("pe") not in ("", None) else None))
+        pb.append(e.get("pb") if e.get("pb") not in ("", None) else None)
         if e.get("trade_date"):
             dates.append(str(e.get("trade_date")))
     df = df.copy()
-    df["total_mv"] = pd.to_numeric(pd.Series(vals, index=df.index), errors="coerce")
+    df["total_mv"] = pd.to_numeric(pd.Series(mv, index=df.index), errors="coerce")
+    df["pe_ttm"] = pd.to_numeric(pd.Series(pe, index=df.index), errors="coerce")
+    df["pb"] = pd.to_numeric(pd.Series(pb, index=df.index), errors="coerce")
     return df, (max(dates) if dates else "")
 
 

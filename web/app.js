@@ -2388,6 +2388,29 @@ function stkFactors(d) {
         "<em>" + (p == null ? "—" : p.toFixed(1) + "%") + "</em></td></tr>";
   }).join("");
 }
+/* 多视角评分：每行 = 视角 / 信号 / 分数条 / 分数，下一行是依据。
+   分数条从中线向两侧长：右红（偏多）、左绿（偏空），与全站涨跌配色一致。 */
+function stkPersonaHtml(d) {
+  const list = d.personas || [];
+  const SIG = { bullish: ["偏多", "up"], bearish: ["偏空", "down"],
+                neutral: ["中性", "flat"], unknown: ["缺数据", "no"] };
+  return list.map((p) => {
+    const s = SIG[p.signal] || SIG.neutral;
+    const sc = Number(p.score) || 0;
+    const w = Math.max(2, Math.min(50, Math.abs(sc) / 2));   // 半条最多 50%
+    const bar = p.missing ? "" :
+      '<i class="' + (sc >= 0 ? "pos" : "neg") + '" style="width:' + w.toFixed(1) + '%"></i>';
+    const txt = (p.points || [])[0] || p.missing_note || "";
+    return '<div class="stk-prow' + (p.missing ? " na" : "") + '">' +
+      '<div class="stk-pname"><b>' + esc(p.name) + "</b><span>" + esc(p.school) + "</span></div>" +
+      '<span class="pill ' + s[1] + '">' + s[0] + "</span>" +
+      '<div class="stk-pbar">' + bar + "</div>" +
+      '<span class="stk-pnum">' + (p.missing ? "—" : (sc > 0 ? "+" : "") + sc) + "</span>" +
+      '<div class="stk-ptxt">' + esc(txt) + "</div>" +
+      "</div>";
+  }).join("");
+}
+
 function stkRiskHtml(d) {
   const lv = d.levels || {}, va = d.valuation || {};
   const n = (v, dd) => stkNum(v, dd);
@@ -2463,6 +2486,7 @@ function stkPaint() {
     if (body) body.hidden = true;
     $("#stkFactorCard").hidden = true;
     $("#stkReportCard").hidden = true;
+    if ($("#stkPersonaCard")) $("#stkPersonaCard").hidden = true;
     return;
   }
   empty.hidden = true;
@@ -2486,6 +2510,22 @@ function stkPaint() {
     const hasRisk = !!(d.levels && Object.keys(d.levels).length);
     riskCard.hidden = !hasRisk;
     if (hasRisk) $("#stkRisk").innerHTML = stkRiskHtml(d);
+  }
+  const pc = $("#stkPersonaCard");
+  if (pc) {
+    const list = d.personas || [];
+    pc.hidden = !list.length;
+    if (list.length) {
+      $("#stkPersonas").innerHTML = stkPersonaHtml(d);
+      const c = d.consensus || {};
+      const label = c.signal === "bullish" ? "偏多" : c.signal === "bearish" ? "偏空"
+        : c.signal === "neutral" ? "中性" : "无法汇总";
+      $("#stkConsensus").innerHTML = list.length
+        ? "<b>" + (c.score > 0 ? "+" : "") + (c.score == null ? "—" : c.score) + "</b>" +
+          " " + esc(label) + " · " + (c.available || 0) + "/" + (c.total || list.length) + " 视角" +
+          (c.spread == null ? "" : " · 分歧 " + c.spread)
+        : "";
+    }
   }
   const deb = $("#stkDebate");
   if (deb) {
@@ -2641,6 +2681,7 @@ const SCR_PREF_KEY = "quantdesk_screen_prefs_v1";
 const SCR_PREF_IDS = ["scrScope", "scrTopN", "scrUseModel",
   "scrAutoLlm", "scrHorizon", "scrStep", "scrMaxSymbols", "scrTrainStart", "scrTrainEnd",
   "scrIndustryCap", "scrFnQuality", "scrFnSt", "scrFnExtreme", "scrFnLiquidity", "scrFnTrend",
+  "scrFnVal",
   "scrNeutral", "scrLimit", "scrLabelMode"];
 const SCR_FACTOR_LABELS = {
   ret1: "1日收益%", mom5: "5日动量%", mom20: "20日动量%", mom60: "60日动量%",
@@ -2729,7 +2770,8 @@ function scrRunParams() {
       st: $("#scrFnSt").checked,
       extreme: $("#scrFnExtreme").checked,
       liquidity: $("#scrFnLiquidity").checked,
-      trend: $("#scrFnTrend").checked
+      trend: $("#scrFnTrend").checked,
+      val: ($("#scrFnVal") && $("#scrFnVal").value) || "off"
     },
     horizon: scrNum("#scrHorizon", 10),
     step: scrNum("#scrStep", 5),

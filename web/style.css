@@ -491,6 +491,11 @@ td.sell{color:var(--down);font-weight:600}
   margin-top:12px;padding-top:12px;border-top:1px dashed var(--line2)}
 .sp-funnel{grid-column:1/-1;display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-top:4px}
 .sp-funnel-lbl{font-size:11.5px;color:var(--ink2);font-weight:600}
+.sp-funnel-sel{display:inline-flex;align-items:center;gap:5px;
+  font-size:11.5px;color:var(--ink2);font-weight:600;cursor:pointer}
+.sp-funnel-sel select{height:26px;padding:0 6px;font-size:11.5px;font-weight:500;
+  border:1px solid var(--ctl-bd);border-radius:7px;background:#fff;color:var(--ink)}
+.sp-funnel-sel select:focus{outline:none;box-shadow:var(--ctl-ring);border-color:var(--blue)}
 
 /* ---------- 选股：两行栅格 ---------- */
 /* 第一行三栏：本期候选＋运行参数 / 行业分布 / T+N 后验。
@@ -1722,6 +1727,31 @@ input[type=date]:focus::-webkit-calendar-picker-indicator{opacity:1}
 .stk-bar span{display:block;height:100%;background:var(--blue);border-radius:4px}
 .stk-fac td em{font-style:normal;font-size:11px;color:var(--ink3);
   font-variant-numeric:tabular-nums}
+/* ---------- 单股：多视角评分 ---------- */
+.stk-cons{font-size:11.5px;color:var(--ink2);font-weight:600;white-space:nowrap}
+.stk-cons b{font-size:14px;margin-right:4px}
+.stk-personas{display:flex;flex-direction:column;gap:9px}
+.stk-prow{display:grid;grid-template-columns:92px 52px minmax(0,1fr) 44px;
+  gap:8px;align-items:center}
+.stk-prow.na{opacity:.55}
+.stk-pname b{display:block;font-size:12.5px;color:var(--ink);line-height:1.3}
+.stk-pname span{display:block;font-size:10.5px;color:var(--ink3);line-height:1.3}
+.stk-pbar{position:relative;height:8px;border-radius:5px;background:#eef1f5;overflow:hidden}
+/* 中线 = 中性；向右红（偏多）、向左绿（偏空），与全站涨跌配色一致 */
+.stk-pbar::after{content:"";position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;
+  background:#d6dce6}
+.stk-pbar i{position:absolute;top:0;bottom:0;display:block;border-radius:5px}
+.stk-pbar i.pos{left:50%;background:var(--up)}
+.stk-pbar i.neg{right:50%;background:var(--down)}
+.stk-pnum{text-align:right;font-size:12px;font-weight:700;color:var(--ink2);
+  font-variant-numeric:tabular-nums}
+.stk-ptxt{grid-column:1/-1;font-size:11px;color:var(--ink3);line-height:1.55;margin-top:-3px}
+.pill.up{background:#fdeceb;color:var(--up)}
+.pill.down{background:#e7f5ee;color:var(--down)}
+.pill.flat{background:#f2f4f7;color:var(--ink3)}
+@media(max-width:560px){
+  .stk-prow{grid-template-columns:76px 46px minmax(0,1fr) 38px;gap:6px}
+}
 .stk-report{max-height:none;min-height:0}
 /* 多空辩论：先看两侧证据，再读整篇报告 */
 .stk-debate{border:1px solid var(--line);border-radius:10px;padding:12px 13px;

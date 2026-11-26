@@ -41,6 +41,51 @@ def test_detail():
     check(not bad.get("ok"), "无效代码被拒绝")
 
 
+def test_personas():
+    """多视角评分：结构、缺数据标注、汇总口径（参考 ai-hedge-fund 的 agent 汇总）。"""
+    print("\n[多视角评分]")
+    d = stockview.detail("600519")
+    if not d.get("ok"):
+        check(False, "取画像失败，跳过")
+        return
+    ps = d.get("personas") or []
+    cons = d.get("consensus") or {}
+    check(len(ps) == 6, "六个视角齐全：%d" % len(ps))
+    names = [p["name"] for p in ps]
+    check(names[:5] == ["价值", "趋势", "反转", "稳健", "量能"], "视角顺序固定：%s" % names)
+    check(all(p["signal"] in ("bullish", "bearish", "neutral", "unknown") for p in ps),
+          "signal 取值合法")
+    check(all(-100 <= p["score"] <= 100 for p in ps), "分数在 -100~100")
+    check(all(0 <= p["confidence"] <= 90 for p in ps), "置信度在 0~90")
+
+    # 质量视角没有财务数据，必须如实标缺，不能编一个代理指标
+    q = next(p for p in ps if p["key"] == "quality")
+    check(q["missing"] and q["signal"] == "unknown" and "财务数据" in q["missing_note"],
+          "质量视角如实标注缺数据：%s" % q["missing_note"][:20])
+
+    # 每个有数据的视角都要给出至少一条带数字的依据
+    for p in ps:
+        if p["missing"]:
+            continue
+        check(bool(p["points"]) and any(ch.isdigit() for ch in p["points"][0]),
+              "%s 视角有量化依据：%s" % (p["name"], (p["points"] or [""])[0][:32]))
+
+    avail = [p for p in ps if not p["missing"]]
+    check(cons.get("available") == len(avail) and cons.get("total") == len(ps),
+          "汇总只统计有数据的视角：%d/%d" % (cons.get("available"), cons.get("total")))
+    check(cons.get("signal") in ("bullish", "bearish", "neutral", "unknown"), "汇总信号合法")
+    # 汇总分数应落在各视角分数区间内（按置信度加权，不可能越界）
+    lo = min(p["score"] for p in avail)
+    hi = max(p["score"] for p in avail)
+    check(lo <= cons.get("score") <= hi, "汇总分数在区间内：%d ∈ [%d, %d]"
+          % (cons.get("score"), lo, hi))
+    check(0 <= cons.get("agreement") <= 100, "同向比例 0~100：%s" % cons.get("agreement"))
+
+    # 缺失数据时不能崩：给一个空画像
+    ps2, cons2 = stockview.personas({"factors": [], "valuation": {}})
+    check(len(ps2) == 6 and cons2["available"] == 0 and cons2["signal"] == "unknown",
+          "全缺数据时返回 unknown 而不是抛错")
+
 def test_local_report():
     print("\n[本地模板]")
     d = stockview.detail("600519")
@@ -160,5 +205,6 @@ if __name__ == "__main__":
     test_analyze_local_fallback()
     test_debate_clean()
     test_debate_flow()
+    test_personas()
     print("\n%s" % ("全部通过" if not FAILED else "失败 %d 项：%s" % (len(FAILED), FAILED)))
     raise SystemExit(1 if FAILED else 0)
