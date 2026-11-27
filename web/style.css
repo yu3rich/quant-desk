@@ -1,5 +1,5 @@
 :root{
-  --bg:#f4f6f9; --card:#fff; --ink:#1b2029; --ink2:#525c6b; --ink3:#8a939f;
+  --bg:#f4f6f9; --card:#fff; --ink:#1b2029; --ink2:#525c6b; --ink3:#6b7482;
   --line:#e4e8ee; --line2:#eef1f5;
   --blue:#1c5fd8; --blue-soft:#eaf1ff; --blue-dark:#164bb0;
   --up:#d3403f; --down:#12996a; --amber:#b8790c; --amber-soft:#fff5e4;
@@ -27,6 +27,56 @@ button,input,select,textarea{font-family:inherit;font-size:inherit}
 a{color:var(--blue);text-decoration:none}
 a:hover{text-decoration:underline}
 [hidden]{display:none!important}
+
+/* ---------- 滚动条 ----------
+   浏览器默认滚动条在浅色界面上太抢眼（一条实心灰柱，还带箭头）。
+   这里统一成「细、圆角、默认低调、悬停加深」：视觉宽度 5px，轨道全透明，
+   只有鼠标移到那块才变深，不滚动时几乎看不见。
+   注意不能同时写 scrollbar-width —— Chromium 里标准属性优先级更高，
+   会把 ::-webkit-scrollbar 的圆角盖掉，所以用 @supports 分开给 Firefox。 */
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{
+  background:#dbe1ea;border:3px solid transparent;border-radius:6px;
+  background-clip:content-box;min-height:32px}
+::-webkit-scrollbar-thumb:hover{background:#b9c4d4;background-clip:content-box}
+::-webkit-scrollbar-thumb:active{background:#93a1b5;background-clip:content-box}
+::-webkit-scrollbar-corner{background:transparent}
+/* 侧栏只有 236px 宽，再窄一档 */
+.nav::-webkit-scrollbar{width:7px}
+.nav::-webkit-scrollbar-thumb{border-width:2px;border-radius:5px}
+@supports not selector(::-webkit-scrollbar){
+  *{scrollbar-width:thin;scrollbar-color:#d5dce6 transparent}
+}
+
+/* ---------- 自绘标题栏（仅 Tauri 窗口） ----------
+   系统标题栏在深色主题下会给窗口画一圈 1px 深灰边框，浅色界面上特别割裂，
+   所以外壳用无边框窗口，这里自己画一条 34px 的标题栏。浏览器访问时由浏览器
+   自己的标签栏承担，默认隐藏，靠 JS 检测到 Tauri 后加 body.in-tauri 才显示。 */
+.titlebar{display:none}
+body.in-tauri{padding-top:34px}
+body.in-tauri .titlebar{
+  display:flex;align-items:center;justify-content:space-between;
+  position:fixed;top:0;left:0;right:0;height:34px;z-index:3000;
+  background:var(--card);border-bottom:1px solid var(--line);user-select:none}
+/* 侧栏是 sticky + 100vh，标题栏占了 34px 要跟着让位，否则会吸到视口顶部盖住标题栏 */
+body.in-tauri .sidebar{top:34px;height:calc(100vh - 34px)}
+.tb-brand{display:flex;align-items:center;gap:8px;padding-left:13px;
+  font-size:12px;font-weight:650;color:var(--ink2);letter-spacing:.01em}
+.tb-logo{width:16px;height:16px;flex:none}
+.tb-actions{display:flex;height:100%}
+.tb-btn{width:46px;height:34px;border:0;background:transparent;cursor:default;
+  display:grid;place-items:center;color:var(--ink2);padding:0;margin:0}
+.tb-btn svg{width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:1.1;
+  stroke-linecap:round;stroke-linejoin:round}
+.tb-btn:hover{background:#eef1f5;color:var(--ink)}
+.tb-btn:active{background:#e4e8ee}
+/* 关闭按钮沿用 Windows 的红底白叉，肌肉记忆别改 */
+.tb-close:hover{background:#e81123;color:#fff}
+.tb-close:active{background:#c50f1f;color:#fff}
+@media(max-width:860px){
+  body.in-tauri .sidebar{top:34px;height:54px}
+}
 
 .app{display:flex;min-height:100vh}
 .sidebar{width:var(--side);flex:0 0 var(--side);background:var(--card);border-right:1px solid var(--line);
@@ -154,6 +204,15 @@ body[data-group="verify"] #btBar{display:block}
 .hint.warn{color:#b06a12;font-weight:600;cursor:pointer;
   text-decoration:underline dotted;text-underline-offset:2px}
 .hint.warn:hover{color:#8a5109}
+/* 数字输入非法：当场标红并给出范围，不再静默回退默认值 */
+input.bad,select.bad,textarea.bad{border-color:#d3403f;background:#fff8f8;padding-right:58px}
+.field-err{display:block;font-size:10.5px;line-height:1.4;color:#c0392b;margin-top:3px}
+/* 数字框的错误提示压在框内右侧：绝对定位不占布局，避免把下方控件顶上去 */
+.field-err.in{position:absolute;transform:translateY(-50%);margin:0;font-size:10px;
+  color:#c0392b;background:transparent;pointer-events:none;white-space:nowrap;z-index:2}
+/* 统一错误块：一句原因 + 可选重试 */
+.err-msg{color:#c0392b}
+.err-box .btn{margin-left:8px}
 .empty{padding:30px 18px;text-align:center;color:var(--ink3);font-size:13px}
 
 /* ---------- 表单控件：统一外观 ----------
@@ -297,7 +356,7 @@ input[type=number]{-moz-appearance:textfield}
    不再单独占一行、也不会把 label 与输入框的对齐关系弄乱。
    右侧留出足够 padding 给后缀，文字不被遮挡。 */
 .input-with-suffix{position:relative;display:block}
-.input-with-suffix input{width:100%;padding-right:82px}
+.input-with-suffix input{width:100%;padding-right:12px}
 .input-suffix{position:absolute;right:10px;top:50%;transform:translateY(-50%);
   font-size:10.5px;color:var(--ink3);pointer-events:none;white-space:nowrap}
 .input-with-suffix:focus-within .input-suffix{color:var(--blue)}
@@ -581,20 +640,77 @@ button.codelink::after{content:" ⓘ";font-size:10px;color:var(--ink3);font-weig
 .scr-warn{color:#6b4a08;background:var(--amber-soft);border:1px solid #f0dcb5;
   border-radius:6px;padding:4px 9px;font-size:11px;line-height:1.55}
 .scr-dim{color:var(--ink3);font-size:11px;opacity:.9}
+/* 「数据日」提示用真按钮：键盘可聚焦，Enter/Space 原生触发；非 warn 时不可点 */
+.scr-asof-tag{border:0;background:none;padding:0;margin:0;font:inherit;
+  cursor:default;text-align:left;vertical-align:baseline}
+.scr-asof-tag.warn{cursor:pointer}
+.scr-asof-tag:focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:3px}
+.scr-price-note{margin-left:6px;font-weight:400}
+/* 长任务说明：告诉用户后端在跑、可以切页 */
+.scr-run-note{margin:8px 0 0;font-size:11px;color:var(--ink3);line-height:1.5}
 
-.scr-detail-row td{background:#fbfcfe;white-space:normal;padding:12px 16px}
-.scr-detail-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:5px 14px;font-size:11px;color:var(--ink2)}
-.scr-detail-grid b{color:var(--ink);font-variant-numeric:tabular-nums;font-weight:650}
-.scr-detail-chart{margin-top:12px;border-top:1px dashed var(--line2);padding-top:10px}
-.scr-ch-h{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:4px}
-.scr-ch-h b{font-size:12px;color:var(--ink);font-variant-numeric:tabular-nums}
-.scr-ch-note{font-size:10.5px;color:var(--ink3);cursor:help;border-bottom:1px dotted var(--line2)}
-.scr-ch-q{margin-left:auto;display:flex;align-items:baseline;gap:9px;font-size:11px}
+/* ---------- 选股：候选榜展开行 ----------
+   左右两栏：左栏「因子明细 5 列 + 当日分时」上下叠，右栏「空头辩护」独占整个右侧。
+   三块都直接铺在展开行的灰底上，没有任何白底圆角卡片；
+   辩护不设滚动，理由全部自适应展开。头部标识条已去掉。 */
+.scr-detail-row td{background:#f6f8fb;white-space:normal;padding:10px 12px}
+/* 展开行 td 是 tr 里唯一的单元格，会命中 .pool-table td:first-child 的
+   text-align:center；这里必须重置，否则分组标题和辩护正文全被继承成居中。 */
+.scr-detail{padding:2px 2px 0;text-align:left}
+.scr-block-h{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.scr-block-h h4{margin:0;font-size:11.5px;font-weight:700;color:var(--ink);letter-spacing:.02em}
+.scr-block-note{margin-left:auto;font-size:10px;color:var(--ink3)}
+
+/* 因子：基本信息 / 动量与趋势 / 波动与位置 / 量能 / 行业相对，基本信息排第一列。
+   左栏只有约 2/3 宽，min 取 120px：宽屏 5 列同排，窄屏 auto-fit 自动折行
+   （不写死 5 列，不新增媒体查询断点）。 */
+.scr-line-factor{margin-bottom:0;padding-bottom:10px;border-bottom:1px solid var(--line)}
+.scr-fac-groups{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(120px,100%),1fr));
+  gap:9px 12px;align-items:start}
+.scr-fac-group{min-width:0}
+.scr-fac-group h5{display:flex;align-items:center;gap:6px;margin:0 0 4px;
+  font-size:10px;font-weight:700;color:var(--blue);letter-spacing:.05em;
+  text-align:left;padding-bottom:4px;border-bottom:1px solid var(--line)}
+.scr-fac-group h5::before{content:"";display:inline-block;width:5px;height:5px;
+  border-radius:2px;background:var(--blue);flex:none}
+.scr-fac-item{display:flex;align-items:baseline;justify-content:space-between;gap:5px;
+  font-size:10.5px;line-height:1.7;color:var(--ink3);min-width:0;text-align:left}
+/* 5 列挤在左栏，长标签允许折行而不是省略（「行业内相对动量%」等） */
+.scr-fac-item>span{white-space:normal;overflow-wrap:anywhere;line-height:1.35}
+.scr-fac-item b{color:var(--ink);font-weight:650;font-variant-numeric:tabular-nums;
+  white-space:nowrap;flex:none;max-width:56%;overflow:hidden;text-overflow:ellipsis}
+
+/* 两栏用 flex-wrap：宽屏左栏吃到约 2/3 宽（因子 5 列才放得下），
+   右栏辩护与左栏顶部对齐、独占整个右侧；窄屏自动折成上下，无需 @media。 */
+.scr-detail-cols{display:flex;flex-wrap:wrap;gap:14px 26px;align-items:flex-start}
+.scr-detail-left{flex:4 1 400px;min-width:0;display:flex;flex-direction:column;gap:12px}
+.scr-line-chart{min-width:0}
+.scr-line-chart .scr-ch-q{margin-left:auto;display:flex;align-items:baseline;gap:9px;font-size:11px}
 .scr-ch-q .mk-px{font-size:15px}
 .scr-ch-q .mk-pct{font-size:11.5px}
 .scr-ch-q .mk-meta{font-size:10.5px}
-.chart.scr-mini{height:210px}
-.scr-detail-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.chart.scr-mini{height:178px;width:100%}
+
+/* 空头辩护：直接展示、无容器、不滚动，理由全部自适应展开；条目只用细虚线分隔 */
+.scr-bear-plain{flex:1 1 330px;min-width:0;padding:0 2px}
+.scr-bear-plain .scr-block-h{border-bottom:1px solid var(--line);padding-bottom:6px}
+.scr-bear-verdict{font-size:10px;font-weight:700;border-radius:5px;padding:1px 7px;margin-left:auto}
+.scr-bear-verdict.keep{color:var(--down);background:#e8f7f0}
+.scr-bear-verdict.drop{color:var(--up);background:#fdecec}
+.scr-bear-list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column}
+.scr-bear-list li{padding:7px 0;border-bottom:1px dashed var(--line2)}
+.scr-bear-list li p{margin:0;font-size:11.5px;line-height:1.5;color:var(--ink);font-weight:550;text-align:left}
+.scr-bear-meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 10px;margin-top:4px}
+.scr-bear-meta span{font-size:10px;line-height:1.4;color:var(--ink3);text-align:left}
+.scr-bear-meta i{font-style:normal;color:var(--ink2);font-weight:650;margin-right:5px;
+  background:#eef2f8;border-radius:3px;padding:0 4px}
+.scr-bear-judge{margin:8px 0 0;font-size:10.5px;line-height:1.45;color:var(--ink2);
+  border-left:2px solid var(--blue);padding-left:8px;text-align:left}
+.scr-bear-judge b{color:var(--blue);margin-right:6px}
+.scr-bear-plain.is-empty .scr-bear-none{margin:0;font-size:11px}
+
+.scr-detail-foot{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}
+.scr-foot-note{margin-left:auto;font-size:10px;color:var(--ink3)}
 
 /* ---------- 选股：漏斗 ---------- */
 .scr-funnel{margin:10px 0 0}
@@ -878,6 +994,13 @@ textarea{font-family:ui-monospace,Consolas,"Microsoft YaHei",monospace;
 .pool-table td{padding:6px 10px}
 .pool-table .op{display:flex;gap:5px}
 .pool-table th:first-child,.pool-table td:first-child{width:34px;text-align:center}
+/* 34px 居中是给「#」列的。因子名/时间/代码/行业做首列时不该被压窄居中：
+   按表覆盖，而不是让位置选择器承担语义。 */
+.pool-table.t-left th:first-child,.pool-table.t-left td:first-child,
+.fc-table th:first-child,.fc-table td:first-child,
+.hub-runs th:first-child,.hub-runs td:first-child,
+.log-table th:first-child,.log-table td:first-child,
+#tgBuyBody td:first-child,#tgSellBody td:first-child{width:auto;text-align:left}
 .opb{border:1px solid var(--line);background:#fff;color:var(--ink2);border-radius:5px;
   padding:2px 7px;font-size:11px;cursor:pointer;line-height:1.5;white-space:nowrap}
 .opb:hover{border-color:var(--blue);color:var(--blue)}
@@ -939,7 +1062,7 @@ summary:focus-visible,a:focus-visible{outline:2px solid var(--blue);outline-offs
   .kpis{grid-template-columns:repeat(2,1fr)}
   .grid2{grid-template-columns:1fr}
   .mini-inner{grid-template-columns:repeat(2,1fr)}
-  .scr-detail-grid{grid-template-columns:repeat(3,1fr)}
+  /* 展开行双栏在中等屏自动收成单栏（见 .scr-detail-cols 的 auto-fit），无需断点覆写 */
   /* 选股页：第一行三栏在中等屏收成「结论通栏 + 后两栏并排」，第二行落成单列 */
   .scr-topline{grid-template-columns:repeat(2,minmax(0,1fr))}
   .scr-topline>.scr-dash{grid-column:1/-1}
@@ -1060,10 +1183,18 @@ summary:focus-visible,a:focus-visible{outline:2px solid var(--blue);outline-offs
   .chart{height:250px}
   .chart.mid{height:220px}
   .chart.tall{height:320px}
-  .scr-detail-grid{grid-template-columns:repeat(2,1fr)}
   .scr-form{grid-template-columns:1fr}
   .mini-inner{grid-template-columns:1fr}
   .reason{max-width:200px;min-width:150px}
+  /* 自绘下拉的触发器是 <button>，不命中上面 input/select 的 16px 规则；
+     32px 高也低于触控建议值，和同排 38px 的按钮不一致。 */
+  body .app .ep-sel-trigger{font-size:16px;min-height:38px}
+  body .app .ep-sel-opt{padding:10px 9px;font-size:15px}
+  /* 候选榜 11 列在手机上要横滑：冻结「#」与「代码」两列，滑到右边也知道在看哪只票。
+     展开行是单个 colspan 单元格，必须排除，否则它也会被钉住。 */
+  #scrTable tr:not(.scr-detail-row) > *:nth-child(1){position:sticky;left:0;z-index:2;background:var(--card)}
+  #scrTable tr:not(.scr-detail-row) > *:nth-child(2){position:sticky;left:34px;z-index:2;background:var(--card)}
+  #scrTable thead th:nth-child(1),#scrTable thead th:nth-child(2){z-index:3}
 }
 /* ---------------- 选股记录：左列表 / 右详情 ---------------- */
 .pk-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
@@ -1332,9 +1463,27 @@ tr.rowlink:hover td{background:#f7f9fc}
   border:2.5px solid rgba(28,95,216,.18);border-top-color:var(--blue);
   box-shadow:none;animation:sysledspin .8s linear infinite}
 @keyframes sysledspin{to{transform:rotate(360deg)}}
+/* 引导动画到达：状态灯光晕脉冲一下，把视线落到「进度在这里」 */
+.sysled.beacon-ping::after{content:"";position:absolute;inset:-9px;border-radius:50%;
+  border:2px solid var(--blue);animation:beaconPing .85s ease-out forwards;pointer-events:none}
+@keyframes beaconPing{0%{opacity:.85;transform:scale(.5)}100%{opacity:0;transform:scale(1.5)}}
 @media(prefers-reduced-motion:reduce){
   .sysled.local .sysled-dot{animation:none;border-top-color:var(--blue)}
 }
+/* 任务启动引导：中心厚重转圈→缩小飞向右上角状态灯。
+   不做背景虚化/遮罩，也不要文字——只靠圆圈自身的体积和阴影抓住视线。
+   转圈用 SVG 圆弧 + stroke-linecap:round（圆头），CSS border 的端点天生是方头。
+   全程 pointer-events:none 不锁页面；动画结束状态灯自己接管显示进度。 */
+#taskBeacon{position:fixed;inset:0;z-index:94;display:none;pointer-events:none}
+#taskBeacon.on{display:block}
+#taskBeacon .tb-core{position:absolute;left:50%;top:48%;width:52px;height:52px;
+  transform:translate(-50%,-50%);will-change:transform,opacity}
+#taskBeacon .tb-ring{display:block;width:52px;height:52px;transform-origin:50% 50%;
+  animation:sp .8s linear infinite;
+  filter:drop-shadow(0 8px 16px rgba(28,95,216,.32)) drop-shadow(0 2px 5px rgba(20,30,50,.18))}
+#taskBeacon .tb-track{fill:none;stroke:var(--blue-soft);stroke-width:6}
+#taskBeacon .tb-arc{fill:none;stroke:var(--blue);stroke-width:6;stroke-linecap:round;
+  stroke-dasharray:42 126}
 
 /* 数据中枢 */
 .hub-steps{display:flex;flex-wrap:wrap;gap:8px 16px;margin:11px 0 2px}
@@ -1795,7 +1944,12 @@ input[type=date]:focus::-webkit-calendar-picker-indicator{opacity:1}
 .stk-hrow.on{background:var(--blue-soft)}
 .stk-hopen{flex:1;min-width:0;border:0;background:none;text-align:left;padding:7px 8px;
   border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.stk-hopen b{font-size:12px;color:var(--ink);font-variant-numeric:tabular-nums}
+.stk-hname{font-size:11.5px;font-weight:650;color:var(--ink);max-width:100%;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stk-hname i{font-style:normal;font-weight:400;color:var(--ink3);font-size:10px;margin-left:4px;
+  font-variant-numeric:tabular-nums}
+.stk-hrow.cur .stk-hname{color:var(--blue-dark)}
+.stk-hopen b{font-size:11px;color:var(--ink3);font-variant-numeric:tabular-nums}
 .stk-hopen em{font-style:normal;font-size:10.5px;color:var(--ink3);
   font-variant-numeric:tabular-nums;margin-left:auto}
 .stk-tag{font-style:normal;font-size:9.5px;font-weight:650;padding:1px 5px;border-radius:4px;
@@ -1855,9 +2009,13 @@ input[type=date]:focus::-webkit-calendar-picker-indicator{opacity:1}
   text-overflow:ellipsis;white-space:nowrap}
 .vsrc-ops{display:flex;gap:5px;flex:none}
 .btn.xs{padding:3px 8px;font-size:11px;width:auto;border-radius:6px;line-height:1.5}
-.pill.bad{background:#fdeceb;color:var(--up)}
+/* 错误/异常不再用「上涨红」：红涨绿跌的语境里，error pill 会被读成利好 */
+.pill.bad{background:#fff4e5;color:#9a5b00;border:1px solid #f2d9b8}
 @media (max-width:900px){
-  .vsrc-ops{display:none}
+  /* 顺序调整是这一页的核心功能，手机上不能直接藏掉：缩成小按钮，必要时换行 */
+  .vsrc{flex-wrap:wrap}
+  .vsrc-ops{display:flex;gap:4px;margin-left:auto}
+  .vsrc-ops .btn.xs{padding:3px 6px;font-size:10.5px}
   .vsrc-main em{white-space:normal}
 }
 

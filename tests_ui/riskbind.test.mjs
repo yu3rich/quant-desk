@@ -48,7 +48,7 @@ test("风险预算：KPI、走势条、超预算标红", () => {
     assert.equal(bars.length, 3, "每期一根走势条");
     assert.ok(bars[2].classList.contains("over"), "使用率 384% 的条形标红");
     assert.ok(bars[0].classList.contains("over"), "210% 同样超过 100%，也标红");
-    assert.match(bars[2].getAttribute("title"), /使用率 384%/);
+    assert.match(bars[2].dataset.tip, /使用率 384%/);
   } finally {
     close(ctx);
   }

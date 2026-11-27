@@ -22,7 +22,7 @@ from pathlib import Path
 
 import requests
 
-BASE = Path(__file__).resolve().parent
+from paths import BASE, DATA
 CONFIG_PATH = BASE / "data" / "llm.json"
 
 DEFAULT = {"enabled": False, "base_url": "", "api_key": "", "model": "",

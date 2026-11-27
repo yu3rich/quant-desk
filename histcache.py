@@ -151,5 +151,13 @@ def last_bar(code: str, back: int = 1) -> dict | None:
 
 
 def invalidate():
-    """数据库即读即见（WAL），无需清理缓存。"""
+    """兼容旧调用点：真正要清的是 chartdata 的图表缓存（TTL 180 秒）。
+
+    数据库本身即读即见（WAL），这里只负责把下游图表缓存一起作废。
+    """
+    try:
+        import chartdata
+        chartdata.invalidate()
+    except Exception:
+        pass
     return True

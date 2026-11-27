@@ -38,8 +38,7 @@ def _atomic_csv(df, path) -> None:
     df.to_csv(tmp, index=False, encoding="utf-8-sig")
     os.replace(tmp, path)
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+from paths import BASE, DATA
 SCREEN_DIR = DATA / "screen"
 SCREEN_DIR.mkdir(parents=True, exist_ok=True)
 UNIVERSE_PATH = DATA / "universe.csv"
@@ -480,7 +479,10 @@ def _json_read(p: Path, default=None):
 
 
 def _json_write(p: Path, obj):
-    p.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 与 CSV 同理：直接 write_text 是先截断再写，读端可能拿到半截 JSON。
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, p)
 
 
 def _universe_names() -> dict[str, dict]:
@@ -650,13 +652,37 @@ def last_features(d: pd.DataFrame) -> dict | None:
     return _lf_arrays(_frame_cols(d))
 
 
-def last_features_raw(code: str, n: int = 200) -> dict | None:
-    """从库尾直接读数组算因子，跳过 DataFrame（省掉 pandas 1.5 ms 固定开销）。"""
+# 因子结果缓存：键含「最后交易日 + 入库时间 + 因子版本」，行情没变就直接复用。
+# 建一次全市场快照约 4~5 秒（查库与 numpy 计算各一半），但同一天里
+# 「生成快照 → 单股详情 → 再选股」会重复建好几次，缓存后重复调用接近 0。
+_LF_CACHE: dict[tuple, dict] = {}
+_LF_CACHE_MAX = 8000
+
+
+def last_features_raw(code: str, n: int = 200, stamp: tuple | None = None) -> dict | None:
+    """从库尾直接读数组算因子，跳过 DataFrame（省掉 pandas 1.5 ms 固定开销）。
+
+    stamp=(last_date, updated) 时启用结果缓存：调用方已经知道这只票的行情版本，
+    命中就不必再查库、也不必重算。不传则保持原来的「每次现算」，给一致性探针
+    和测试用，避免缓存掩盖口径问题。
+    """
+    key = None
+    if stamp:
+        key = (str(code).zfill(6), str(stamp[0] or ""), str(stamp[1] or ""),
+               FEATURE_VERSION, int(n))
+        hit = _LF_CACHE.get(key)
+        if hit is not None:
+            return hit
     import histcache
     a = histcache.ohlcv(code, n)
     if not a or len(a["c"]) < 80:
         return None
-    return _lf_arrays(_ohlcv_cols(a))
+    out = _lf_arrays(_ohlcv_cols(a))
+    if out is not None and key is not None:
+        if len(_LF_CACHE) >= _LF_CACHE_MAX:
+            _LF_CACHE.clear()
+        _LF_CACHE[key] = out
+    return out
 
 
 def _frame_cols(d: pd.DataFrame) -> dict:
@@ -1006,8 +1032,12 @@ def _consistency_probe(rows: list[dict], limit: int = 40) -> str:
 
 
 def build_snapshot(scope: str = "cached", as_of: str | None = None,
-                   limit: int = 0) -> dict:
-    """limit=0 表示全市场（默认）；正数则等间隔抽样，兼顾速度与代码空间覆盖。"""
+                   limit: int = 0, include_rows: bool = True) -> dict:
+    """limit=0 表示全市场（默认）；正数则等间隔抽样，兼顾速度与代码空间覆盖。
+
+    include_rows=False 只返回 meta（count/date_max/warning 等）。快照有 5000+ 行、
+    JSON 约 4MB，而「生成快照」按钮只需要这几个字段，没必要序列化整张表。
+    """
     # 与行情更新并发时直接拒绝：否则会把更新前的旧 K 线固化成一张过期快照，
     # 表面上「选股成功」，实际数据日停在几天前。
     if cache_updating():
@@ -1025,6 +1055,12 @@ def build_snapshot(scope: str = "cached", as_of: str | None = None,
     if not codes:
         return {"ok": False, "error": "没有可用的本地行情缓存，请先在「股票池 → 全 A 股名单」里预热行情"}
     uni = _universe_names()
+    # 行情版本表只取一次：因子缓存靠 (last_date, updated) 判断能否复用
+    try:
+        import store as _store
+        _meta_map = _store.meta_map()
+    except Exception:
+        _meta_map = {}
     rows = []
     # 分批读取：一次把全市场五千多只的 DataFrame 全展开会吃掉 1 GB 以上内存，
     # 每批 300 只读完即算即弃，峰值只有几十 MB。
@@ -1042,7 +1078,9 @@ def build_snapshot(scope: str = "cached", as_of: str | None = None,
             # 当期快照：完全不构造 DataFrame，直接读 CSV 尾部数组算因子。
             # 1500 只约 2 秒，全市场五千多只约 7 秒，是首屏「点一下要等很久」的主因。
             for code in batch:
-                last = last_features_raw(code)
+                mm = _meta_map.get(str(code).zfill(6)) or {}
+                last = last_features_raw(
+                    code, stamp=(mm.get("last_date"), mm.get("updated")))
                 if last:
                     item = _snap_item(code, last, uni)
                     if item:
@@ -1125,6 +1163,8 @@ def build_snapshot(scope: str = "cached", as_of: str | None = None,
             "warning": "；".join(warns)}
     if persist:
         _json_write(SNAPSHOT_META, meta)
+    if not include_rows:
+        return {**meta, "rows": [], "file": str(SNAPSHOT_CSV)}
     return {**meta, "rows": _rows(snap), "file": str(SNAPSHOT_CSV)}
 
 
@@ -1381,7 +1421,14 @@ def load_dataset() -> tuple[pd.DataFrame | None, dict]:
 def status() -> dict:
     import store
     snap_df, snap_meta = load_snapshot()
-    ds_df, ds_meta = load_dataset()
+    # 训练集 93MB：status 只需要行数与 meta，过去每次都全量 read_csv（实测 300ms+）。
+    # 正常情况直接读 DATASET_META；只有老 meta 缺 rows 时才退回解析一次。
+    ds_meta = _json_read(DATASET_META, {}) or {}
+    ds_loaded = bool(DATASET_CSV.exists() and ds_meta.get("rows") is not None)
+    ds_df = None
+    if DATASET_CSV.exists() and not ds_loaded:
+        ds_df, ds_meta = load_dataset()
+        ds_loaded = ds_df is not None
     uni = _universe_names()
     ind = {}
     try:
@@ -1412,8 +1459,8 @@ def status() -> dict:
         "neutral": neutral_info,
         "snapshot": {**snap_meta, "loaded": snap_df is not None,
                      "rows": 0 if snap_df is None else int(len(snap_df))},
-        "dataset": {**ds_meta, "loaded": ds_df is not None,
-                    "rows": 0 if ds_df is None else int(len(ds_df))},
+        "dataset": {**ds_meta, "loaded": ds_loaded,
+                    "rows": int(ds_meta.get("rows") or 0) if ds_loaded else 0},
         "modules": MODULES,
         "industry": ind,
         "funnel": {"defaults": FUNNEL_DEFAULT, "industry_cap": INDUSTRY_CAP_DEFAULT},

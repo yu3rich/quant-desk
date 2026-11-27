@@ -49,8 +49,7 @@ try:
 except Exception:
     pass
 
-BASE = Path(__file__).resolve().parent
-WEB = BASE / "web"
+from paths import BASE, DATA, WEB
 # 后验重放结果的小缓存：key → (时间戳, 响应体)
 _REVIEW_CACHE: dict = {}
 # .webmanifest 默认不在 Python 的映射表里，不显式登记会按 text/plain 发出，
@@ -98,9 +97,11 @@ def _gzip_json(resp):
         if "gzip" not in (request.headers.get("Accept-Encoding") or ""):
             return resp
         raw = resp.get_data()
-        if len(raw) < 1024:
+        # 本地回环传 4MB 的成本远低于请求线程里 gzip(level 6) 的 100ms+；
+        # 小响应直接不压，大响应也只用低级别（浏览器解析省下的体积才是主要收益）。
+        if len(raw) < 262144:
             return resp
-        packed = _gzip.compress(raw, 6)
+        packed = _gzip.compress(raw, 3)
         if len(packed) >= len(raw) * 0.92:
             return resp
         resp.set_data(packed)
@@ -166,6 +167,38 @@ def lan_urls(port: int) -> list[str]:
             continue
         out.append("http://%s:%d/" % (ip, port))
     return out
+
+
+def _local_spot_qmap() -> tuple[dict, str]:
+    """本地行情快照 -> 与 spot.prev_closes 同结构（不联网）。
+
+    spot.csv 由盘中每 4 秒刷新，字段有 price/pct/time，但没有 prev_close；
+    这里用 price/(1+pct/100) 反推昨收。盘后 qdate == 最新 bar 日时直接用现价，
+    与原来调腾讯接口的口径一致。没有快照就返回空，调用方回退后复权并标注来源。
+    """
+    out: dict[str, dict] = {}
+    at = ""
+    try:
+        at = str((spot.status() or {}).get("updated") or "")
+        for code, r in (spot.load() or {}).items():
+            px = spot._f(r.get("price"))
+            pct = spot._f(r.get("pct"))
+            pc = px / (1 + pct / 100.0) if px > 0 and pct > -99.9 else 0.0
+            if px <= 0 and pc <= 0:
+                continue
+            tm = str(r.get("time") or "")
+            # 快照可能是早盘的：15:00 前抓到的 price 不能当成「今日收盘」。
+            # real_price 看到 stale 且 qdate==最新 bar 日时会拒绝换算，回退后复权。
+            hour = int(tm[8:10]) if len(tm) >= 10 and tm[8:10].isdigit() else -1
+            out[str(code).zfill(6)] = {
+                "prev_close": pc if pc > 0 else None,
+                "price": px if px > 0 else None,
+                "qdate": tm[:8],
+                "stale": hour < 15,
+            }
+    except Exception:
+        pass
+    return out, at
 
 
 def _latest_bar_day() -> str:
@@ -461,7 +494,7 @@ def index_quotes():
     try:
         return jsonify(chartdata.indices())
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)[:160]})
+        return fail(e)
 
 
 @app.route("/api/chart")
@@ -474,10 +507,10 @@ def chart_data():
         code = request.args.get("code", "")
         period = request.args.get("period", "day")
         if not code:
-            return jsonify({"ok": False, "error": "缺少股票代码"})
+            return fail("缺少股票代码")
         return jsonify(chartdata.get(code, period))
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)[:160]})
+        return fail(e)
 
 
 # --------------------------------------------------------------------------
@@ -684,7 +717,8 @@ def emt_logout():
 @app.route("/api/emt/board")
 def emt_board():
     try:
-        days = int(request.args.get("days") or 180)
+        # 账本一年也就 250 个交易日；不钳制的话 days=100000 会把整份账本序列化返回
+        days = max(1, min(int(request.args.get("days") or 180), 400))
         b = emtbook.board(days=days)
         b["ai"] = emtai.state(b)          # 只读状态：不触发模型、不写盘
         return jsonify(b)
@@ -866,6 +900,9 @@ def screen_pipeline():
         only = b.get("only")
         if isinstance(only, list):
             only = [str(x) for x in only if str(x) in ("quote", "snapshot", "dataset", "model")]
+            # 空列表归一成 None：否则 `if only:` 为假，会把四段全关，
+            # 与 /api/data/run 的同名参数行为不一致。
+            only = only or None
         else:
             only = None
         workers = int(b["workers"]) if b.get("workers") else None
@@ -988,6 +1025,17 @@ def sources_fetch():
 # 只打包 bars + bar_meta：这是唯一需要别人花一两个小时从数据源重拉的东西。
 # 账本、日记、选股记录、LLM 辩护都在同一个 quant.db 里，所以绝不能整库拷。
 PACK_DIR = Path(__file__).resolve().parent / "data" / "packs"
+
+
+@app.route("/api/health")
+def health():
+    """轻量健康检查：外壳（Tauri / Edge --app）靠它判断服务是否就绪。
+
+    刻意不碰数据库与快照：启动那一刻 quant.db 可能还在建索引，
+    查一下就变慢，会让外壳误以为服务没起来。
+    """
+    import paths as _p
+    return jsonify({"ok": True, "frozen": _p.FROZEN, "base": str(_p.BASE)})
 
 
 @app.route("/api/data/pack/status")
@@ -1157,6 +1205,32 @@ def tasks_status():
                     "key": "universe_prewarm", "name": "全 A 行情预热",
                     "done": d, "total": t, "pct": (d / t) if t else None,
                     "detail": str(st.get("message") or "")[:80],
+                })
+        except Exception:
+            pass
+
+        # 4) 行情包导出/导入（datapack）：340MB 写盘要几十秒，状态灯要能读到进度
+        try:
+            import datapack
+            st = datapack.status() or {}
+            if st.get("running"):
+                kind = st.get("kind") or ""
+                name = "行情包导入" if kind == "import" else "导出行情包"
+                d, t = int(st.get("done") or 0), int(st.get("total") or 0)
+                # datapack 的 pct 是 0~100 的整数；_set 会按 done/total 重算，
+                # 但「打包」阶段只给 message 不给 total，所以优先用现成 pct。
+                pct = (float(st.get("pct")) / 100.0) if st.get("pct") is not None else None
+                if pct is None and t:
+                    pct = d / t
+                detail = str(st.get("phase") or "")
+                if st.get("message"):
+                    detail += (" · " if detail else "") + str(st.get("message"))
+                if t:
+                    detail += (" · " if detail else "") + ("%d / %d" % (d, t))
+                tasks.append({
+                    "key": "pack", "name": name,
+                    "done": d, "total": t, "pct": pct,
+                    "detail": detail[:80],
                 })
         except Exception:
             pass
@@ -1371,6 +1445,18 @@ def screen_resume():
         rec_at = str(rows[0][1])
         # meta 里存了因子（mom20/vol20/rsi14/turnover/score/base_score 等）
         mm = store.picks_meta_map(as_of, rec_at)
+        # 一次取齐这批候选的最新收盘价。原来是循环里逐只 SELECT（最多 200 次），
+        # 每次 1ms 看着不多，但 resume 是首屏路径，能省就省。
+        batch_codes = [str(r[2]).zfill(6) for r in rows
+                       if str(r[0])[:10] == as_of and str(r[1]) == rec_at]
+        last_close: dict[str, float] = {}
+        if batch_codes:
+            qs = ",".join("?" * len(batch_codes))
+            for bcode, bclose in store.conn().execute(
+                    "SELECT code, close FROM bars WHERE code IN (%s) AND date>=? "
+                    "ORDER BY code, date" % qs, (*batch_codes, as_of)):
+                if bclose is not None:
+                    last_close[str(bcode).zfill(6)] = float(bclose)
         cands = []
         for r in rows:
             if str(r[0])[:10] != as_of or str(r[1]) != rec_at:
@@ -1387,30 +1473,38 @@ def screen_resume():
                 if k in m and m[k] is not None:
                     item[k] = m[k]
             # pct 由缓存算：记录日收盘 → 最新收盘（与 picks_log 同口径）
-            try:
-                bar = store.conn().execute(
-                    "SELECT close FROM bars WHERE code=? AND date>=? ORDER BY date DESC LIMIT 1",
-                    (code, as_of)).fetchone()
-                if bar and bar[0] and item.get("close"):
-                    item["pct"] = (float(bar[0]) / float(item["close"]) - 1) * 100
-            except Exception:
-                pass
+            bclose = last_close.get(code)
+            if bclose and item.get("close"):
+                item["pct"] = (bclose / float(item["close"]) - 1) * 100
             cands.append(item)
 
         cands.sort(key=lambda x: (x.get("rank") if isinstance(x.get("rank"), int) else 999))
         for i, c in enumerate(cands, 1):
             c["rank"] = i
 
-        # 真实价换算（与 screen_run 末尾一致）
+        # 真实价换算（与 screen_run 末尾一致）：最新一根 K 线也一次查齐，
+        # 避免 200 只候选再各查一次 histcache.last_bar。
+        last_bars: dict[str, dict] = {}
+        if cands:
+            cs = [c["code"] for c in cands]
+            qs = ",".join("?" * len(cs))
+            for bcode, bdate, bclose in store.conn().execute(
+                    "SELECT code, date, close FROM bars WHERE code IN (%s) "
+                    "ORDER BY code, date" % qs, cs):
+                if bclose is not None:
+                    last_bars[str(bcode).zfill(6)] = {
+                        "date": str(bdate), "close": float(bclose)}
+        price_at = ""
         try:
-            qmap = spot.prev_closes([c["code"] for c in cands])
+            # 本地快照优先：不再在首屏请求里同步等腾讯接口（被墙时最多 10 秒）
+            qmap, price_at = _local_spot_qmap()
             for c in cands:
+                lb = last_bars.get(c["code"])
                 hfq_last = c.get("close")
-                lb = histcache.last_bar(c["code"])
                 if lb and lb.get("close"):
                     hfq_last = lb["close"]
                 c["close_real"] = spot.real_price(c.get("close"), hfq_last,
-                                                  str(lb.get("date") or "")[:10] if lb else "",
+                                                  (lb or {}).get("date", "")[:10],
                                                   qmap.get(c["code"]))
         except Exception:
             pass
@@ -1463,9 +1557,13 @@ def screen_resume():
         except Exception:
             expo = {}
 
+        got_real = sum(1 for c in cands if c.get("close_real") is not None)
         return jsonify({
             "ok": True, "empty": False, "candidates": cands,
             "as_of": as_of, "count": sample_n, "topn": len(cands),
+            "price_source": ("spot" if got_real and got_real == len(cands)
+                             else "hfq" if not got_real else "mixed"),
+            "price_at": price_at,
             "last_pick_at": str(store.picks_version()[1] or ""),
             "restored": True,
             "engine": "restored",
@@ -1486,10 +1584,12 @@ def screen_snapshot():
     """生成横截面因子快照（只读本地缓存，不联网）。"""
     try:
         b = request.get_json(silent=True) or {}
+        # 前端生成快照后只读 count / date_max / warning，默认不必回 4MB 的 rows
         return jsonify(screener.build_snapshot(
             scope=str(b.get("scope") or "cached"),
             as_of=(b.get("as_of") or None),
-            limit=screener.norm_limit(b.get("limit"))))
+            limit=screener.norm_limit(b.get("limit")),
+            include_rows=not bool(b.get("meta_only"))))
     except Exception as e:
         return fail(e)
 
@@ -1550,8 +1650,11 @@ def screen_run():
             latest = _latest_bar_day()
             # 数据日之外，范围与样本上限也得一致：否则改了「全市场 / 上限」还复用
             # 旧截面，界面上的样本数会停在上一组参数，看着像参数没生效。
+            # 因子集升级后旧快照不能复用：否则模型在它没训练过的列上打分，
+            # 只会降级成基准分并给一句 warning，很容易被忽略。
             same_cfg = (str(snap_meta.get("scope") or "cached") == scope
-                        and screener.norm_limit(snap_meta.get("limit")) == limit)
+                        and screener.norm_limit(snap_meta.get("limit")) == limit
+                        and str(snap_meta.get("feature_version") or "") == str(screener.FEATURE_VERSION))
             if (latest and str(snap_meta.get("as_of") or "")[:10] != latest) or not same_cfg:
                 snap_df, snap_meta = None, {}
             else:
@@ -1673,20 +1776,40 @@ def screen_run():
         # 候选表的 close 是后复权价（因子口径），直接给人看会差出复权因子
         # （罗曼股份 hfq 97.87 vs 真实 52）。用腾讯昨收/现价把展示价换算回真实价，
         # 涨跌幅与收益口径不受影响（本就同口径相除）。
+        price_at = ""
         try:
-            import histcache
             latest_day = _latest_bar_day()
-            qmap = spot.prev_closes([c["code"] for c in r["candidates"]])
+            # 本地快照优先：选股请求里不再同步等腾讯接口（失败时最多 10 秒）
+            qmap, price_at = _local_spot_qmap()
+            # 一次取齐「候选日期落后于最新数据日」的那批 K 线，别再逐只查
+            need = [c["code"] for c in r["candidates"]
+                    if latest_day and str(c.get("date") or "")[:10] != latest_day]
+            last_bars: dict[str, dict] = {}
+            if need:
+                qs = ",".join("?" * len(need))
+                for bcode, bdate, bclose in store.conn().execute(
+                        "SELECT code, date, close FROM bars WHERE code IN (%s) "
+                        "ORDER BY code, date" % qs, need):
+                    if bclose is not None:
+                        last_bars[str(bcode).zfill(6)] = {
+                            "date": str(bdate), "close": float(bclose)}
             for c in r["candidates"]:
                 q = qmap.get(c["code"])
                 hfq_last, last_date = c.get("close"), str(c.get("date") or "")[:10]
-                if latest_day and last_date != latest_day:
-                    lb = histcache.last_bar(c["code"])
-                    if lb:
-                        hfq_last, last_date = lb["close"], lb["date"]
+                lb = last_bars.get(c["code"])
+                if lb:
+                    hfq_last, last_date = lb["close"], lb["date"]
                 c["close_real"] = spot.real_price(c.get("close"), hfq_last, last_date, q)
         except Exception:
             pass
+        try:
+            got_real = sum(1 for c in r["candidates"] if c.get("close_real") is not None)
+            r["price_source"] = ("spot" if got_real and got_real == len(r["candidates"])
+                                 else "hfq" if not got_real else "mixed")
+            r["price_at"] = price_at
+        except Exception:
+            r["price_source"] = "hfq"
+            r["price_at"] = ""
         LAST_RUN.update(rows=r["candidates"], as_of=r.get("as_of", ""),
                         horizon=(r.get("model") or {}).get("dataset", {}).get("horizon"),
                         engine=r.get("engine", ""), at=dt.datetime.now().isoformat(timespec="seconds"),

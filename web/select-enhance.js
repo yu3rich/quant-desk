@@ -66,7 +66,8 @@
       var cur = list[i];
       var val = trigger.querySelector('.ep-sel-val');
       if (val) val.textContent = cur ? cur.text : '';
-      trigger.title = cur ? cur.text : '';
+      // 触发器本身已显示选中项，再挂原生 title 只会和统一气泡叠成两层
+      trigger.removeAttribute('title');
       trigger.setAttribute('aria-label', cur ? cur.text : '请选择');
       trigger.disabled = !!sel.disabled;
 

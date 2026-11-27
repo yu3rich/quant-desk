@@ -152,3 +152,52 @@ test("进度条填充块必须 display:block", () => {
   const css = fs.readFileSync(path.join(ROOT, "web/style.css"), "utf8");
   assert.match(css, /\.stk-bar span\{display:block/);
 });
+
+test("历史列表展示全部股票：换股分析后前一只记录仍可见", async () => {
+  // mock 返回两只股票各一条记录，模拟真实库中多只股票共存的情形
+  const HIST = { ok: true, items: [
+    { id: 12, code: "000338", name: "潍柴动力", at: "2026-11-27 09:12:00",
+      mode: "ai", score: 0.031, rank: 820 },
+    { id: 9, code: "600519", name: "贵州茅台", at: "2026-11-25 10:30:00",
+      mode: "ai", score: 0.018, rank: 1430 },
+  ] };
+  const DETAIL2 = { ...DETAIL, code: "000338", name: "潍柴动力" };
+  const multiApi = (url) => {
+    if (url.includes("/api/stock/analyze")) return { ok: true, id: 12, at: "2026-11-27 09:12:00",
+      mode: "ai", model: "deepseek-flash", report: REPORT, detail: DETAIL2, debate: null, warning: "" };
+    if (url.includes("/api/stock/reports/")) return { ok: true, id: 12, code: "000338", name: "潍柴动力",
+      mode: "ai", model: "deepseek-flash", at: "2026-11-27 09:12:00",
+      payload: { detail: DETAIL2, report: REPORT, debate: null } };
+    if (url.includes("/api/stock/reports")) return HIST;
+    if (url.includes("/api/stock/detail")) return { ...DETAIL2, ok: true };
+    return { ok: true, items: [], count: 0, entries: [], runs: [], sources: {} };
+  };
+  const ctx = makePage({ api: multiApi });
+  try {
+    const { doc, window } = ctx;
+    // 请求历史时不带 code 过滤（全站拉取）
+    await window.stkLoadReports();
+    const reqs = ctx.calls.filter((c) => c.url.includes("/api/stock/reports"));
+    assert.ok(reqs.every((c) => !c.url.includes("code=")), "历史请求不应带 code 过滤");
+    const rows = doc.querySelectorAll("#stkHist .stk-hrow");
+    assert.equal(rows.length, 2, "两只股票的记录都应显示");
+    assert.match(doc.getElementById("stkHist").textContent, /贵州茅台/);
+    assert.match(doc.getElementById("stkHist").textContent, /潍柴动力/);
+    assert.match(doc.getElementById("stkHist").textContent, /600519/);
+    assert.match(doc.getElementById("stkHist").textContent, /000338/);
+
+    // 分析新股：历史列表仍保持两只都可见（不再收敛到新股）
+    doc.getElementById("stkCode").value = "000338";
+    await window.stkAnalyze();
+    assert.equal(doc.querySelectorAll("#stkHist .stk-hrow").length, 2,
+      "换股分析后前一只记录仍应在列表里");
+    assert.match(doc.getElementById("stkHist").textContent, /贵州茅台/);
+
+    // 点开前一只的记录能切回它的股票代码
+    const old = [...doc.querySelectorAll("#stkHist .stk-hopen")]
+      .find((b) => b.dataset.id === "9");
+    assert.ok(old, "前一只股票的历史条目可点开");
+  } finally {
+    close(ctx);
+  }
+});

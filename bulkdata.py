@@ -31,8 +31,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+from paths import BASE, DATA
 CONFIG = BASE / "config.json"
 UNIVERSE = DATA / "universe.csv"
 # 最近一次行情任务用的数据源（降级/限流提示要跨进程重启保留）
@@ -721,9 +720,8 @@ def _run_parallel(codes: list[str], mode: str, cache_start: str, end: str, worke
     for p in paths:
         try:
             chunk = json.loads(p.read_text(encoding="utf-8"))
-            # 冻结成 exe 后 __file__ 指向临时解压目录、sys.executable 就是 exe 本身：
-            # 再用「脚本路径 + --worker」拉起会变成又启动一个完整服务（端口占用后秒退），
-            # 所以打包态改用参数入口，由 main.py 分派到 worker。
+            # 冻结环境下 __file__ 指向临时解压目录，只能用参数入口拉起 worker；
+            # 开发态直接用脚本路径 + --worker。
             if getattr(sys, "frozen", False):
                 cmd = [sys.executable, "--bulkdata-worker",
                        str(p), mode, cache_start, end]

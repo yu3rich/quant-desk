@@ -19,7 +19,34 @@
 </head>
 <body data-page="screen" data-group="screen">
 
+<!-- 自绘标题栏：只在 Tauri 窗口里显示（body.in-tauri）。浏览器访问时由浏览器自己的
+     标签栏承担，所以默认隐藏。data-tauri-drag-region 交给 Tauri 的注入脚本处理拖拽，
+     双击会自动最大化，不需要额外写代码。 -->
+<div class="titlebar" id="titlebar" data-tauri-drag-region>
+  <div class="tb-brand" data-tauri-drag-region>
+    <svg class="tb-logo" viewBox="0 0 32 32" aria-hidden="true">
+      <rect width="32" height="32" rx="8" fill="#1c5fd8"/>
+      <path d="M7 21.5l5-6.5 4 4.2 4-7.4 5 5.2" stroke="#fff" stroke-width="2.2"
+            stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </svg>
+    <span>QuantDesk</span>
+  </div>
+  <div class="tb-actions">
+    <button class="tb-btn" id="tbMin" type="button" aria-label="最小化" data-tip="最小化">
+      <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2.2 5h5.6"/></svg>
+    </button>
+    <button class="tb-btn" id="tbMax" type="button" aria-label="最大化" data-tip="最大化">
+      <svg viewBox="0 0 10 10" aria-hidden="true"><rect x="2.6" y="2.6" width="4.8" height="4.8" rx=".5"/></svg>
+    </button>
+    <button class="tb-btn tb-close" id="tbClose" type="button" aria-label="关闭到托盘" data-tip="关闭到托盘">
+      <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2.6 2.6l4.8 4.8M7.4 2.6l-4.8 4.8"/></svg>
+    </button>
+  </div>
+</div>
+
 <div id="loading" role="status" aria-live="polite"><div class="spin"><div class="dot"></div><div class="txt">正在计算…</div></div></div>
+<!-- 任务启动引导：点任务后中心转圈，圆圈缩小飞向右上角状态灯，告诉用户进度在那里看 -->
+<div id="taskBeacon" aria-hidden="true"><div class="tb-core"><svg class="tb-ring" viewBox="0 0 52 52"><circle class="tb-track" cx="26" cy="26" r="20"/><circle class="tb-arc" cx="26" cy="26" r="20"/></svg></div></div>
 <div id="toast" aria-live="polite"></div>
 
 <div class="app">
@@ -117,7 +144,7 @@
 
     <div class="side-foot">
       <div class="sf-todo">
-        <button class="sf-todo-head" id="btnSfTodoRefresh" title="点击重新检查">
+        <button class="sf-todo-head" id="btnSfTodoRefresh" data-tip="点击重新检查">
           <span>今日待办</span><i class="sf-count" id="sfTodoCount">—</i>
         </button>
         <div class="sf-todo-list" id="sfTodoList">
@@ -158,7 +185,8 @@
            有前端本地任务时同一位置转圈（尺寸与圆环一致），悬停看明细。
            原来这里是「?」术语表入口，术语表已独立成页（其他 → 术语表）。 -->
       <button class="sysled" id="sysLed" type="button"
-              aria-label="系统状态，点击查看运行日志" title="系统运行正常 · 点击查看运行日志">
+              aria-label="系统状态，点击查看运行日志"
+              data-tip="系统运行正常 · 点击查看运行日志">
         <svg class="sysled-ring" viewBox="0 0 20 20" aria-hidden="true">
           <circle class="sysled-track" cx="10" cy="10" r="8"></circle>
           <circle class="sysled-fill" id="sysLedFill" cx="10" cy="10" r="8"></circle>
@@ -203,7 +231,7 @@
         </div>
       </div>
       <div class="bt-foot">
-        <button class="btn sec sm" id="btnBtCost" type="button" title="在数据中枢里修改回测成本与资金">成本与资金设置</button>
+        <button class="btn sec sm" id="btnBtCost" type="button" data-tip="在数据中枢里修改回测成本与资金">成本与资金设置</button>
         <span class="bt-tools">
           <button class="btn sec sm" id="btnRefresh">刷新行情</button>
           <button class="btn sec sm" id="btnClearCache">清缓存</button>
@@ -241,13 +269,15 @@
         </div>
         <div class="scr-top-tools">
           <button class="btn sec sm" id="btnScrLlm">LLM 解读</button>
-          <button class="btn sec sm" id="btnBearRun" title="对本期候选逐只找否决理由，结果随批次存档、并显示在候选榜「辩护」列">做辩护</button>
-          <button class="btn sec sm" id="btnBearAb" title="被否决组 vs 保留组的 T+N 对比，判断它拦得对不对">离线 A/B</button>
+          <button class="btn sec sm" id="btnBearRun" data-tip="对本期候选逐只找否决理由，结果随批次存档、并显示在候选榜「辩护」列">做辩护</button>
+          <button class="btn sec sm" id="btnBearAb" data-tip="被否决组 vs 保留组的 T+N 对比，判断它拦得对不对">离线 A/B</button>
           <button class="btn sec sm" id="btnScrExport" style="display:none">导出</button>
-          <button class="btn sec sm" id="btnScrSettings" type="button" title="在数据中枢里设置选股与训练参数">设置</button>
+          <button class="btn sec sm" id="btnScrSettings" type="button" data-tip="在数据中枢里设置选股与训练参数">设置</button>
         </div>
         <button class="btn scr-run" id="btnScrRun">重新选股</button>
       </div>
+      <!-- 长任务说明：后端在跑，切页不影响；进度统一看右上角状态灯 -->
+      <p class="scr-run-note">选股一般 10~60 秒（含全市场快照）· 可离开本页，进度看右上角状态灯</p>
       <!-- 漏斗结论摘要：跨满整卡宽度，紧跟结论条 -->
       <p class="scr-num-sub" id="scrSampleSub"></p>
 
@@ -289,12 +319,11 @@
           </div>
           <div class="field">
             <label for="scrLimit"><span class="term" data-term="cross">横截面</span>样本上限</label>
-            <div class="input-with-suffix" title="0 = 全市场，用本地缓存里所有能算出完整因子的股票；填正数则按上限等间隔抽样，换取更快的构建速度">
+            <div class="input-with-suffix" data-tip="0 表示不设上限，用本地缓存里所有能算出完整因子的股票；填正数则按上限等间隔抽样，换取更快的构建速度">
               <input id="scrLimit" type="number" value="0" min="0" max="20000" step="100">
-              <span class="input-suffix">0 = 全市场</span>
             </div>
           </div>
-          <label class="check" title="快照数据日与最新行情一致时直接复用（秒出），落后就自动重算">
+          <label class="check" data-tip="快照数据日与最新行情一致时直接复用（秒出），落后就自动重算">
             <input type="checkbox" id="scrReuse" checked> 优先复用本期截面</label>
           <div class="sp-funnel">
             <span class="sp-funnel-lbl"><span class="term" data-term="funnel">漏斗</span>过滤</span>
@@ -305,7 +334,7 @@
             <label class="check"><input type="checkbox" id="scrFnTrend"> 站上 20 日线</label>
             <!-- 基本面层参考 InStock 的价值筛选：默认关闭，因为 A 股约三成是亏损股，
                  一开就会一次性剔掉它们，属于明确的风格选择，必须显式选。 -->
-            <label class="sp-funnel-sel" title="保守：剔亏损与极端估值（PE>300 / PB>50 / 市值<10亿）；InStock 口径：0<PE≤20、PB≤10、市值≥20亿">
+            <label class="sp-funnel-sel" data-tip="保守：剔亏损与极端估值（PE>300 / PB>50 / 市值<10亿）；InStock 口径：0<PE≤20、PB≤10、市值≥20亿">
               <span>基本面</span>
               <select id="scrFnVal" class="mini-sel">
                 <option value="off" selected>关闭</option>
@@ -347,7 +376,8 @@
         <!-- 候选榜（主体）：空头辩护的结论并进表格「辩护」列，操作按钮也收在这一栏 -->
         <div class="card">
           <div class="scr-table-head">
-            <h3>候选榜 <span class="hint" id="scrAsOfTag"></span></h3>
+            <h3>候选榜 <button type="button" class="hint scr-asof-tag" id="scrAsOfTag"></button>
+              <span class="hint scr-price-note" id="scrPriceTag"></span></h3>
           <span class="scr-head-tags">
             <span class="pill no" id="scrLlmMode">未重排</span>
             <span class="pill no" id="bearPill">辩护未启用</span>
@@ -356,8 +386,8 @@
         </div>
         <div id="bearAbBody"></div>
         <div class="scr-funnel" id="scrFunnel"></div>
-        <div class="scr-table-wrap"><table class="pool-table" id="scrTable">          <thead><tr><th>#</th><th>代码</th><th>名称</th><th>行业</th><th title="选股日真实收盘价（未复权）">收盘</th><th>当日</th>
-            <th title="否决 / 保留：空头辩护的裁决结论，悬停看完整理由">辩护</th>
+        <div class="scr-table-wrap"><table class="pool-table" id="scrTable">          <thead><tr><th>#</th><th>代码</th><th>名称</th><th>行业</th><th data-tip="选股日真实收盘价（未复权）">收盘</th><th>当日</th>
+            <th data-tip="否决 / 保留：空头辩护的裁决结论，悬停看完整理由">辩护</th>
             <th><span class="term" data-term="score">打分</span></th><th>20 日<span class="term" data-term="mom">动量</span></th>
             <th>LLM</th><th>解读</th></tr></thead>
           <tbody id="scrBody"></tbody>
@@ -479,9 +509,9 @@
           <aside class="pk-side">
             <div class="pk-side-head">
               <span>数据日</span><span>选股日</span><span class="ta-r">只数</span>
-              <span class="ta-r" title="按后复权同口径：记录价 → 最新收盘">至今</span>
-              <span class="ta-r" title="选股后第 5 个交易日收盘的等权平均收益">T+5</span>
-              <span class="ta-r" title="这批里上涨的只数 / 可评估只数">胜</span>
+              <span class="ta-r" data-tip="按后复权同口径：记录价 → 最新收盘">至今</span>
+              <span class="ta-r" data-tip="选股后第 5 个交易日收盘的等权平均收益">T+5</span>
+              <span class="ta-r" data-tip="这批里上涨的只数 / 可评估只数">胜</span>
             </div>
             <div class="pk-list" id="pkList"></div>
           </aside>
@@ -550,7 +580,7 @@
           </div>
         </div>
         <div class="tg-form">
-          <label class="field"><span>总资产（元）</span><input id="tgCapital" type="number" min="0" step="1000" value="0" title="填 0 表示用账本里的总资产"></label>
+          <label class="field"><span>总资产（元）</span><input id="tgCapital" type="number" min="0" step="1000" value="0" data-tip="填 0 表示用账本里的总资产"></label>
           <label class="field"><span>权重方式</span>
             <select id="tgMode">
               <option value="equal">等权</option>
@@ -566,13 +596,13 @@
           <label class="field"><span>单行业上限 %</span><input id="tgIndCap" type="number" min="5" max="100" step="5" value="30"></label>
           <label class="field"><span>换手上限 %</span><input id="tgTurn" type="number" min="0" max="200" step="10" value="60"></label>
           <label class="field"><span>单笔风险 %</span><input id="tgRisk" type="number" min="0.1" max="10" step="0.1" value="1"
-            title="固定风险预算用；也是实盘体检里风险预算的基准"></label>
+            data-tip="固定风险预算用；也是实盘体检里风险预算的基准"></label>
           <label class="field"><span>ATR 倍数</span><input id="tgAtr" type="number" min="1" max="5" step="0.5" value="2"
-            title="2×ATR 作为波动参考距离，不是止损指令"></label>
+            data-tip="2×ATR 作为波动参考距离，不是止损指令"></label>
           <label class="field"><span>Topk</span><input id="tgTopk" type="number" min="0" max="100" step="1" value="0"
-            title="Topk-Drop 的目标持仓数；0 表示按候选数"></label>
+            data-tip="Topk-Drop 的目标持仓数；0 表示按候选数"></label>
           <label class="field"><span>每日换手只数</span><input id="tgDrop" type="number" min="0" max="50" step="1" value="0"
-            title="Topk-Drop：每天最多换几只；0 表示不启用"></label>
+            data-tip="Topk-Drop：每天最多换几只；0 表示不启用"></label>
         </div>
         <div class="tg-sum" id="tgSum">还没有生成。点「用最近一次选股」，或先在选股工作台跑一次。</div>
       </div>
@@ -723,7 +753,7 @@
         <div class="fc-sum" id="fcSum">首次计算约 15~40 秒（300 只 × 120 期 × 24 因子），之后有缓存。</div>
         <div class="scroll" style="max-height:460px;overflow-y:auto">
           <table class="pool-table fc-table">
-            <thead><tr><th>因子</th><th>组</th><th title="RankIC 均值">IC</th><th title="IC 均值 / 标准差">ICIR</th><th>t 值</th><th>正 IC 率</th><th title="D10 − D1">多空</th><th title="Top10% 相邻两期成分变动">换手</th><th title="相邻两期因子秩相关">秩自相关</th><th>覆盖</th><th>十分位（低→高）</th></tr></thead>
+            <thead><tr><th>因子</th><th>组</th><th data-tip="RankIC 均值">IC</th><th data-tip="IC 均值 / 标准差">ICIR</th><th>t 值</th><th>正 IC 率</th><th data-tip="D10 − D1">多空</th><th data-tip="Top10% 相邻两期成分变动">换手</th><th data-tip="相邻两期因子秩相关">秩自相关</th><th>覆盖</th><th>十分位（低→高）</th></tr></thead>
             <tbody id="fcBody"></tbody>
           </table>
         </div>
@@ -1435,7 +1465,7 @@
           <h3>行业列表</h3>
           <span class="hint" id="indTableHint">点行业名看成分股</span>
         </div>
-        <div class="scroll" style="margin-top:10px"><table class="pool-table">
+        <div class="scroll" style="margin-top:10px"><table class="pool-table t-left">
           <thead><tr><th>行业</th><th>层级</th><th>成分数</th><th>有行情</th>
             <th>20 日强度</th><th>5 日<span class="term" data-term="turnover">换手</span></th><th>覆盖</th></tr></thead>
           <tbody id="indBody"></tbody>
@@ -1448,7 +1478,7 @@
           <h3>成分股 <span class="hint" id="indMemberTag">未选择行业</span></h3>
           <span class="scr-head-tags"><button class="btn sec sm" id="btnIndAddPool">加入股票池</button></span>
         </div>
-        <div class="scroll"><table class="pool-table">
+        <div class="scroll"><table class="pool-table t-left">
           <thead><tr><th>代码</th><th>名称</th><th>现价</th><th>涨跌</th>
             <th><span class="term" data-term="pe">PE</span></th><th><span class="term" data-term="pb">PB</span></th>
             <th>总市值(亿)</th><th>换手%</th><th>行情</th></tr></thead>
@@ -1504,7 +1534,7 @@
             <button class="btn sec sm" id="btnBulkFull">全量补全</button>
             <button class="btn sec sm" id="btnBulkStop">停止</button>
             <input id="bulkLimit" type="number" placeholder="限量" min="1" style="max-width:100px;flex:0 0 auto" aria-label="限量">
-            <input id="bulkWorkers" type="number" value="6" min="1" max="8" title="并行进程数，建议 6" style="max-width:84px;flex:0 0 auto" aria-label="并行进程数">
+            <input id="bulkWorkers" type="number" value="6" min="1" max="8" data-tip="并行进程数，建议 6" style="max-width:84px;flex:0 0 auto" aria-label="并行进程数">
           </div>
           <div class="bulk-confirm" id="bulkConfirm" hidden>
             <span id="bulkConfirmText">—</span>
@@ -1773,7 +1803,7 @@
           <div class="jn-foot">
             <span id="jnMeta">选一天开始记录，或点「写今天」</span>
             <button class="jn-fmt" id="btnJnFormat" type="button"
-              title="给旧日记的裸标题补上 Markdown 的 ## 标记，只加格式、不改文字">整理格式</button>
+              data-tip="给旧日记的裸标题补上 Markdown 的 ## 标记，只加格式、不改文字">整理格式</button>
             <span id="jnChars">0 字</span>
           </div>
         </div>

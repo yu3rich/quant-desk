@@ -21,8 +21,7 @@ import requests
 
 import store
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+from paths import BASE, DATA
 DATA.mkdir(parents=True, exist_ok=True)
 WATCH_PATH = DATA / "watchlist.json"
 NAMES_PATH = DATA / "names.json"

@@ -34,8 +34,7 @@ from pathlib import Path
 
 import requests
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+from paths import BASE, DATA
 EXTRA = DATA / "extra"
 SOURCES = DATA / "sources.json"
 BASIC_CSV = EXTRA / "daily_basic.csv"

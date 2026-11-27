@@ -49,9 +49,10 @@ test("任何 data-tip 元素都能触发气泡（行业分布不再用原生 tit
   assert.match(js, /const SEL = "\.term, \.q, \[data-tip\]"/);
   assert.match(js, /data-tip="' \+ esc\(tipBody\)/);
   assert.doesNotMatch(js, /class="scr-exp-row" title=/);
-  // 股票池缓存 pill：用气泡，同时压掉 <tr> 的原生 title
+  // 股票池缓存 pill：只用气泡，原生 title 已全部移除
   assert.match(js, /data-tip-name="行情缓存"/);
-  assert.match(js, /class="pill ' \+ \(s\.cached \? "yes" : "no"\) \+ '" title=""/);
+  assert.match(js, /class="pill ' \+ \(s\.cached \? "yes" : "no"\) \+ '" data-tip="/);
+  assert.doesNotMatch(js, /class="pill ' \+ \(s\.cached \? "yes" : "no"\) \+ '" title=/);
 });
 
 test("辩护与状态灯仍走各自的内容渲染，但共用同一个浮层", () => {

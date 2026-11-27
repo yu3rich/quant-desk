@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import threading
 
 import datasource
 import histcache
@@ -51,6 +52,11 @@ def _pct_rank(values, v, direction):
     return round(p * 100, 1)
 
 
+# 单股详情是 GET，快照落后时会顺手重建全市场截面（约 5 秒）。两个标签页同时
+# 点两只股票就会各算一遍，所以这里做「单飞」：只让一个请求重建，其余等它写完后复用。
+_SNAP_LOCK = threading.Lock()
+
+
 def _snapshot(force: bool = False):
     """当日横截面。快照缺失或落后于数据日时重建；重建失败退回旧快照并如实告警。"""
     snap, meta = screener.load_snapshot()
@@ -58,14 +64,20 @@ def _snapshot(force: bool = False):
     stale = bool(day and str(meta.get("as_of") or "") and str(meta["as_of"]) < day)
     warn = ""
     if snap is None or force or stale:
-        r = screener.build_snapshot(scope="cached")
-        if r.get("ok"):
-            meta = {k: v for k, v in r.items() if k not in ("rows", "file")}
-            return r.get("rows") or [], meta, ""
-        if snap is None:
-            return [], meta, r.get("error") or "快照生成失败"
-        warn = "快照刷新失败，沿用 %s 的旧快照：%s" % (
-            meta.get("as_of") or "?", r.get("error") or "")
+        with _SNAP_LOCK:
+            # 等锁期间别的请求可能已经重建好了，重新读一次再判断，避免重复计算
+            snap, meta = screener.load_snapshot()
+            day = store.data_day()
+            stale = bool(day and str(meta.get("as_of") or "") and str(meta["as_of"]) < day)
+            if snap is None or force or stale:
+                r = screener.build_snapshot(scope="cached")
+                if r.get("ok"):
+                    meta = {k: v for k, v in r.items() if k not in ("rows", "file")}
+                    return r.get("rows") or [], meta, ""
+                if snap is None:
+                    return [], meta, r.get("error") or "快照生成失败"
+                warn = "快照刷新失败，沿用 %s 的旧快照：%s" % (
+                    meta.get("as_of") or "?", r.get("error") or "")
     return screener._rows(snap), meta, warn
 
 

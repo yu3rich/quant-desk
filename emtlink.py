@@ -62,8 +62,7 @@ from pathlib import Path
 
 import journal as journal_md
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+from paths import BASE, DATA
 CFG_PATH = DATA / "emt.json"
 LEDGER = DATA / "ledger"
 RAW_DIR = LEDGER / "_raw"

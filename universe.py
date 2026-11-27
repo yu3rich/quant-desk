@@ -17,8 +17,7 @@ from pathlib import Path
 
 import requests
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+from paths import BASE, DATA
 DATA.mkdir(parents=True, exist_ok=True)
 UNIVERSE_PATH = DATA / "universe.csv"
 

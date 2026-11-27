@@ -32,8 +32,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+from paths import BASE, DATA
 CFG_PATH = DATA / "capital.json"
 
 URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"

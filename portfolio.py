@@ -26,8 +26,7 @@ import json
 import math
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+from paths import BASE, DATA
 CFG_PATH = DATA / "portfolio.json"
 
 DEFAULTS = {"mode": "equal", "max_w": 0.12, "ind_cap": 0.30,

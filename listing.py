@@ -35,8 +35,7 @@ import threading
 import time
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+from paths import BASE, DATA
 DATA.mkdir(parents=True, exist_ok=True)
 LISTING_PATH = DATA / "listing.csv"
 FIELDS = ["code", "name", "ipo_date", "out_date", "status", "type", "market", "updated"]

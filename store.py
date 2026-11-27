@@ -31,8 +31,7 @@ from pathlib import Path
 
 import pandas as pd
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+from paths import BASE, DATA
 DB_PATH = DATA / "quant.db"
 LEGACY_CACHE = DATA / "cache"
 LEGACY_PICKS = DATA / "screen" / "picks.csv"
@@ -66,6 +65,8 @@ CREATE TABLE IF NOT EXISTS pick_archive(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   as_of TEXT, recorded_at TEXT, at TEXT, payload TEXT);
 CREATE INDEX IF NOT EXISTS pick_archive_at ON pick_archive(id DESC);
+-- 选股记录回看按 as_of 定位批次：没有它时 5000+ 条归档要全表扫
+CREATE INDEX IF NOT EXISTS pick_archive_asof ON pick_archive(as_of, id DESC);
 CREATE TABLE IF NOT EXISTS pick_bear(
   as_of TEXT NOT NULL, recorded_at TEXT NOT NULL,
   at TEXT, mode TEXT, payload TEXT,
@@ -94,6 +95,8 @@ CREATE TABLE IF NOT EXISTS syslog(
 CREATE INDEX IF NOT EXISTS syslog_id_desc ON syslog(id DESC);
 CREATE INDEX IF NOT EXISTS syslog_level ON syslog(level, id DESC);
 CREATE INDEX IF NOT EXISTS syslog_src ON syslog(src, id DESC);
+-- 每天 prune 按 at 删除，避免全表扫
+CREATE INDEX IF NOT EXISTS syslog_at ON syslog(at);
 CREATE TABLE IF NOT EXISTS capital(
   code TEXT NOT NULL, date TEXT NOT NULL,
   lhb_net REAL, lhb_amt REAL, blk_amt REAL, blk_prem REAL,
@@ -309,8 +312,16 @@ def _migrate_picks(c) -> None:
                 "INSERT OR REPLACE INTO picks(as_of,recorded_at,code,name,industry,rank,score,close) "
                 "VALUES(?,?,?,?,?,?,?,?)", rows)
             c.commit()
-        except Exception:
+        except Exception as e:
+            # 与 _migrate_bars 一致：失败不置标志，下次启动重试。
+            # 过去无论成败都标记完成，一次编码错误就会让旧 picks 永久丢失。
             c.rollback()
+            try:
+                log("store", "picks 迁移失败，下次启动重试：%s" % e, level="error",
+                    act="migrate")
+            except Exception:
+                pass
+            return
     _set_flag(c, "picks_migrated")
 
 
@@ -572,11 +583,31 @@ def has_code(code: str) -> bool:
 
 
 def clear_bars() -> int:
+    """清空日线缓存。
+
+    980 万行一次性 DELETE 会让 WAL 暴涨、写锁持续几十秒，其它写连接（行情增量、
+    账本同步）会撞上 busy_timeout 被记成失败。这里按 500 只一批提交，把长事务拆开。
+    """
     c = conn()
     n = cached_count()
-    c.execute("DELETE FROM bars")
-    c.execute("DELETE FROM bar_meta")
-    c.commit()
+    codes = [r[0] for r in c.execute("SELECT code FROM bar_meta").fetchall()]
+    try:
+        for i in range(0, len(codes), 500):
+            batch = codes[i:i + 500]
+            qs = ",".join("?" * len(batch))
+            c.execute("DELETE FROM bars WHERE code IN (%s)" % qs, batch)
+            c.execute("DELETE FROM bar_meta WHERE code IN (%s)" % qs, batch)
+            c.commit()
+        # 兜底：bar_meta 里没有、但 bars 里残留的（理论上不该有）
+        if c.execute("SELECT 1 FROM bars LIMIT 1").fetchone():
+            c.execute("DELETE FROM bars")
+        c.commit()
+    except Exception:
+        try:
+            c.rollback()
+        except Exception:
+            pass
+        raise
     return n
 
 

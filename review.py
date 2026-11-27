@@ -32,7 +32,7 @@ import listing
 import screener
 import store
 
-BASE = Path(__file__).resolve().parent
+from paths import BASE, DATA
 HORIZONS = (5, 10, 20)
 MAX_ENTRY_GAP = 10          # 建仓日停牌超过这么多个交易日，视为买不到
 

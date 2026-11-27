@@ -11,6 +11,8 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import os
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -18,7 +20,7 @@ import pandas as pd
 
 import screener
 
-BASE = Path(__file__).resolve().parent
+from paths import BASE, DATA
 SCREEN_DIR = BASE / "data" / "screen"
 SCREEN_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_PATH = SCREEN_DIR / "model.txt"
@@ -50,7 +52,9 @@ def _meta() -> dict:
 
 
 def _write_meta(m: dict):
-    MODEL_META.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = MODEL_META.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, MODEL_META)
 
 
 def _corr(a, b) -> float | None:
@@ -96,7 +100,22 @@ def _prep_infer(df: pd.DataFrame, meta: dict) -> pd.DataFrame:
     return _matrix(df, keys)
 
 
+# 训练互斥：界面「训练模型」与流水线「重训模型」可能同时触发。两次训练交错写
+# model.txt / model.json 时，可能出现「权重来自 A、口径说明来自 B」且不会报错。
+TRAIN_LOCK = threading.Lock()
+
+
 def train(params: dict | None = None, only_keys: list[str] | None = None) -> dict:
+    """训练入口：加互斥，避免并发训练把模型文件写串。"""
+    if not TRAIN_LOCK.acquire(blocking=False):
+        return {"ok": False, "error": "已有训练任务在进行，请等它结束后再试"}
+    try:
+        return _train_impl(params, only_keys)
+    finally:
+        TRAIN_LOCK.release()
+
+
+def _train_impl(params: dict | None = None, only_keys: list[str] | None = None) -> dict:
     """用 screener.build_dataset() 产出的数据集训练模型。
 
     only_keys 可选：只训练指定的因子列。用于消融实验（例如对比「旧 18 因子 vs 新增形态因子」），
@@ -177,7 +196,10 @@ def train(params: dict | None = None, only_keys: list[str] | None = None) -> dic
                             callbacks=[lgb.early_stopping(40, verbose=False),
                                        lgb.log_evaluation(0)])
         pred = booster.predict(Xva)
-        booster.save_model(str(MODEL_PATH))
+        # 先写临时文件再替换：避免读到只写了一半的模型
+        _tmp_model = MODEL_PATH.with_suffix(".txt.tmp")
+        booster.save_model(str(_tmp_model))
+        os.replace(_tmp_model, MODEL_PATH)
         imp = booster.feature_importance(importance_type="gain")
         total = float(imp.sum()) or 1.0
         importance = {k: round(float(v) / total, 4)
@@ -324,8 +346,11 @@ def train(params: dict | None = None, only_keys: list[str] | None = None) -> dic
 
 
 def _write_meta_ridge(w, mu, sd):
-    (SCREEN_DIR / "ridge.json").write_text(
-        json.dumps({"w": w, "mu": mu, "sd": sd}, ensure_ascii=False), encoding="utf-8")
+    p = SCREEN_DIR / "ridge.json"
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"w": w, "mu": mu, "sd": sd}, ensure_ascii=False),
+                   encoding="utf-8")
+    os.replace(tmp, p)
 
 
 def _ridge_meta() -> dict:

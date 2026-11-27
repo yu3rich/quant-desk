@@ -18,7 +18,9 @@ test("登记本地任务后状态灯转圈、页面不遮罩", () => {
   const led = doc.getElementById("sysLed");
   assert.ok(led.classList.contains("on"), "有本地任务时应进入运行态");
   assert.ok(led.classList.contains("local"), "应标记为本地任务（绿点转圈）");
-  assert.match(led.getAttribute("title") || "", /单因子体检/, "悬停应说明正在做什么");
+  assert.match(led.dataset.tip || "", /单因子体检/,
+    "悬停应说明正在做什么（统一走 data-tip，不用原生 title）");
+  assert.ok(!led.getAttribute("title"), "不应再设原生 title，否则会和气泡叠成两层");
 
   const loading = doc.getElementById("loading");
   assert.ok(!loading.classList.contains("on"), "不应再弹全屏遮罩");

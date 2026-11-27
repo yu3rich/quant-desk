@@ -18,6 +18,115 @@ function todayStr() {
 function num(n, d) { return Number(n).toFixed(d === undefined ? 2 : d); }
 function signCls(n) { return n > 0 ? "pos" : (n < 0 ? "neg" : ""); }
 function signed(n, d) { return (n > 0 ? "+" : "") + num(n, d) + "%"; }
+/* 统一的百分比格式：符号、颜色、小数位由参数控制。
+   候选榜的「当日」早就带符号和红绿，「20 日动量」却只有数字——同一行两套观感。 */
+function fmtPct(v, opt) {
+  const o = opt || {};
+  if (v == null || v === "" || !Number.isFinite(Number(v))) return '<span class="pk-na">—</span>';
+  const n = Number(v);
+  const s = (o.sign && n > 0 ? "+" : "") + n.toFixed(o.dp == null ? 2 : o.dp) + "%";
+  return o.cls ? '<span class="' + (n > 0 ? "up" : n < 0 ? "down" : "") + '">' + s + "</span>" : s;
+}
+
+/* 数字输入的行内校验：过去非法值会被 scrNum 静默换成默认值，
+   用户以为参数生效了，实际跑的是另一套。这里当场标红并说明范围。 */
+const NUM_RULES = {
+  scrTopN: [1, 100, "TopN", true],
+  scrLimit: [0, 20000, "横截面样本上限", true],
+  scrMaxSymbols: [10, 6000, "训练股票上限", true],
+  tgCapital: [0, 1e12, "总资产", false],
+  tgMaxW: [1, 100, "单票上限", false],
+  tgIndCap: [5, 100, "单行业上限", false],
+  tgTurn: [0, 200, "换手上限", false],
+  tgRisk: [0.1, 10, "单笔风险", false],
+  tgAtr: [1, 5, "ATR 倍数", false],
+  tgTopk: [0, 100, "Topk", true],
+  tgDrop: [0, 50, "每日换手只数", true]
+};
+function checkNum(el, rule) {
+  const min = rule[0], max = rule[1], label = rule[2], int = rule[3];
+  const raw = String(el.value == null ? "" : el.value).trim();
+  const v = Number(raw);
+  let msg = "";
+  if (raw === "" || !Number.isFinite(v)) msg = label + " 需要填数字";
+  else if (v < min || v > max) msg = label + " 应在 " + min + "~" + max;
+  else if (int && !Number.isInteger(v)) msg = label + " 需要整数";
+  el.classList.toggle("bad", !!msg);
+  const parent = el.parentElement;
+  let tip = parent && Array.from(parent.children).find(
+    (n) => n.classList && n.classList.contains("field-err"));
+  if (msg) {
+    if (!tip && parent) {
+      tip = document.createElement("span");
+      tip.className = "field-err in";
+      parent.appendChild(tip);
+      if (getComputedStyle(parent).position === "static") parent.style.position = "relative";
+    }
+    if (tip) {
+      // 框内只放短提示（范围/必填），完整说明由字段标签本身承担；
+      // 绝对定位覆盖在输入框右侧，不再把下面的控件顶下去。
+      const fmt = (n) => (n >= 1e6 ? n.toExponential(0).replace("+", "") : String(n));
+      tip.textContent = /应在/.test(msg) ? (fmt(min) + "~" + fmt(max))
+        : /整数/.test(msg) ? "整数" : "必填";
+      tip.style.top = (el.offsetTop + el.offsetHeight / 2) + "px";
+      tip.style.right = Math.max(6, parent.clientWidth - el.offsetLeft - el.offsetWidth + 8) + "px";
+    }
+  } else if (tip) {
+    tip.remove();
+  }
+  return !msg;
+}
+function bindNumRules() {
+  Object.keys(NUM_RULES).forEach((id) => {
+    const el = $("#" + id);
+    if (!el) return;
+    const run = () => checkNum(el, NUM_RULES[id]);
+    el.addEventListener("input", run);
+    el.addEventListener("blur", run);
+  });
+  // 日期区间：结束日早于开始日是最常见的填错，直接在结束日上标出来
+  [["start", "end", "回测区间"], ["scrTrainStart", "scrTrainEnd", "训练集区间"]]
+    .forEach(([aId, bId, label]) => {
+      const a = $("#" + aId), b = $("#" + bId);
+      if (!a || !b) return;
+      const run = () => {
+        const bad = !!(a.value && b.value && b.value < a.value);
+        b.classList.toggle("bad", bad);
+        const parent = b.parentElement;
+        let tip = parent && Array.from(parent.children).find(
+          (n) => n.classList && n.classList.contains("field-err"));
+        if (bad) {
+          if (!tip && parent) {
+            tip = document.createElement("span");
+            tip.className = "field-err";
+            parent.appendChild(tip);
+          }
+          if (tip) tip.textContent = label + "的结束日不能早于开始日";
+        } else if (tip) {
+          tip.remove();
+        }
+      };
+      a.addEventListener("change", run);
+      b.addEventListener("change", run);
+    });
+}
+function numOk(ids) {
+  return (ids || Object.keys(NUM_RULES)).every((id) => {
+    const el = $("#" + id);
+    return !el || !NUM_RULES[id] || checkNum(el, NUM_RULES[id]);
+  });
+}
+/* 统一错误块：一句人话原因 + 可选「重试」。以前失败只有 toast，几秒后消失，
+   用户回头只看到空表，不知道是没数据还是出错了。 */
+function errBox(el, msg, opt) {
+  const box = typeof el === "string" ? $(el) : el;
+  if (!box) return;
+  box.innerHTML = '<span class="err-msg">' + esc(msg || "操作失败") + "</span>" +
+    (opt && opt.retry
+      ? ' <button type="button" class="btn sec sm" data-err-retry>重试</button>' : "");
+  const b = box.querySelector("[data-err-retry]");
+  if (b && opt && opt.retry) b.addEventListener("click", opt.retry);
+}
 
 const TOAST_KIND = {
   ok: { title: "任务完成", icon: "✓" },
@@ -130,7 +239,6 @@ function toast(msg, type) {
   el.querySelector(".msg-ic").textContent = kind.icon;
   el.querySelector(".msg-title").textContent = title;
   el.querySelector(".msg-txt").textContent = body;
-  el.querySelector(".msg-title").title = title;
   // 回流到运行日志（用户可见的提示本身就是一条排查线索）
   toastLogPush(type, title && title !== kind.title ? (title + "：" + body) : body);
 
@@ -165,10 +273,25 @@ function loading(on, text) {
   else el.classList.remove("on");
 }
 async function api(path, opts) {
+  // 没有超时的 fetch 一旦遇到 LLM/数据源无响应，按钮会永久停在「解读中…」，
+  // 用户分不清是在跑还是已经死了。默认 120 秒，长任务可在 opts.timeout 放大。
+  const o = Object.assign({}, opts || {});
+  const ms = Number(o.timeout) || 120000;
+  delete o.timeout;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  if (!o.signal) o.signal = ctl.signal;
   try {
-    const r = await fetch(path, opts);
+    const r = await fetch(path, o);
     return await r.json();
-  } catch (e) { return { ok: false, error: String(e) }; }
+  } catch (e) {
+    const timeout = e && e.name === "AbortError";
+    return { ok: false, error: timeout
+      ? "请求超时（" + Math.round(ms / 1000) + " 秒），请重试"
+      : String(e) };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 function post(path, body) {
   return api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -179,6 +302,16 @@ function chart(id) {
 }
 function resizeIn(panel) {
   $$(panel + " .chart").forEach((el) => { if (S.charts[el.id]) S.charts[el.id].resize(); });
+}
+/* 窗口 resize 会在一帧里触发多次，每次都对十几个 ECharts 实例 resize 会明显掉帧。
+   用 rAF 合并成每帧最多一次；图表实例可能已被 dispose，包一层 try。 */
+let _resizeRaf = 0;
+function resizeCharts() {
+  if (_resizeRaf) return;
+  _resizeRaf = requestAnimationFrame(() => {
+    _resizeRaf = 0;
+    Object.values(S.charts).forEach((c) => { try { c.resize(); } catch (e) {} });
+  });
 }
 
 /* ---------------- sidebar ---------------- */
@@ -420,7 +553,7 @@ async function mkIndicesLoad() {
       (Number(x.change) > 0 ? "+" : "") + num(x.change, 2) + " · ";
     const tip = (x.name || "") + " · 高 " + (x.high == null ? "—" : num(x.high, 2)) +
       " 低 " + (x.low == null ? "—" : num(x.low, 2)) + (x.time ? " · " + x.time : "");
-    return '<div class="mk-idx" title="' + esc(tip) + '">' +
+    return '<div class="mk-idx" data-tip="' + esc(tip) + '">' +
       '<div class="mk-idx-body">' +
       '<div class="nm">' + esc(x.name) + "</div>" +
       '<div class="px">' + num(x.price, 2) + "</div>" +
@@ -453,10 +586,10 @@ function mkHistRender() {
   box.innerHTML = a.length ? a.map((x) => {
     const nm = x.name || "";
     return '<span class="mk-hchip" role="button" tabindex="0" data-code="' + x.code +
-      '" title="查看 ' + esc((nm + " " + x.code).trim()) + '">' +
+      '" data-tip="查看 ' + esc((nm + " " + x.code).trim()) + '">' +
       '<span class="hc-name">' + esc(nm || x.code) + "</span>" +
       (nm ? '<span class="hc-code">' + x.code + "</span>" : "") +
-      '<button class="hc-x" data-del="' + x.code + '" title="删除这条记录" aria-label="删除">×</button>' +
+      '<button class="hc-x" data-del="' + x.code + '" data-tip="删除这条记录" aria-label="删除">×</button>' +
       "</span>";
   }).join("") : '<span class="mk-hist-empty">暂无，打开个股后自动记录</span>';
 }
@@ -870,8 +1003,10 @@ function twoStep(btn, label, action) {
 /* ---------------- 我的股票池 ---------------- */
 let POOL = { items: [], count: 0, default: "" };
 function esc(s) {
-  // 股票简称只含中文/字母/数字，滤掉 HTML 控制字符即可避免注入
-  return String(s == null ? "" : s).replace(/[&<>"']/g, "_");
+  // 标准实体转义：以前替换成下划线虽然安全，但「A&B」「PE&PB」会显示成 A_B，失真。
+  // 属性值（如 data-name="…"）也在用本函数，转义引号后同样安全。
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 function syncStockSelect(forceDefault) {
   const cur = $("#code").value.trim();
@@ -889,12 +1024,12 @@ function renderPool() {
   $("#poolMeta").textContent = "共 " + POOL.count + " 只 · 默认 " + (POOL.default || "未设置") +
     " · 更新于 " + POOL.updated + " · 保存在 data/watchlist.json";
   $("#poolBody").innerHTML = POOL.items.map((s, i) =>
-    "<tr class='rowlink' data-code='" + s.code + "' title='点击查看走势'><td>" + (i + 1) + "</td><td><b>" + s.code + "</b>" +
+    "<tr class='rowlink' data-tip='点击查看走势' data-code='" + s.code + "'><td>" + (i + 1) + "</td><td><b>" + s.code + "</b>" +
     (s.code === POOL.default ? ' <span class="pill def">默认</span>' : "") +
     "</td><td>" + esc(s.name) + "</td><td>" + esc(s.source) +
-    // 悬停走统一气泡；title="" 是为了压掉 <tr> 的「点击查看走势」，
+    // 悬停走统一气泡（<tr> 的提示也已改成 data-tip，不再需要 title="" 压制），
     // 否则两个提示会同时弹出来。
-    '</td><td><span class="pill ' + (s.cached ? "yes" : "no") + '" title="" data-tip="' +
+    '</td><td><span class="pill ' + (s.cached ? "yes" : "no") + '" data-tip="' +
     (s.cached ? "本地 SQLite 缓存 · 截至 " + esc(s.bar_date) + " · " + s.bars + " 根日线"
               : "本地 SQLite 暂无该股日线，可到数据中枢补抓") +
     '" data-tip-name="行情缓存">' + (s.cached ? "已缓存" : "未缓存") + "</span></td>" +
@@ -1002,7 +1137,7 @@ async function uniLoad() {
       (r.lag == null ? "若干" : r.lag) + ' 个交易日，建议刷新）</span>') +
     (spOld ? ' <span style="color:var(--amber)">（实时价是旧价，建议刷新）</span>' : "");
   $("#uniBody").innerHTML = r.rows.length ? r.rows.map((x) =>
-    "<tr class='rowlink' data-code='" + x.code + "' title='点击查看走势'><td><input type='checkbox' class='uniCk' data-code='" + x.code + "'" +
+    "<tr class='rowlink' data-tip='点击查看走势' data-code='" + x.code + "'><td><input type='checkbox' class='uniCk' data-code='" + x.code + "'" +
     (UNI.checked.has(x.code) ? " checked" : "") + "></td><td>" + x.code + "</td><td>" + esc(x.name) +
     "</td><td>" + esc(x.market) + "</td><td>" + (x.price === "" ? "-" : esc(x.price)) +
     "</td><td class='" + (x.pct === "" ? "" : signCls(Number(x.pct))) + "'>" +
@@ -1233,7 +1368,7 @@ function rtPaintStatus(st) {
   dot.className = "rt-dot " + cls;
   who.textContent = name;
   when.textContent = hint;
-  when.title = st.refresh_state ? ("刷新状态：" + st.refresh_state) : "";
+  when.dataset.tip = st.refresh_state ? ("刷新状态：" + st.refresh_state) : "";
   const btn = $("#btnRtSync");
   if (btn) btn.textContent = st.configured ? "同步账户" : "先配置账号";
   rtPaintHist(st.history);
@@ -1277,8 +1412,8 @@ function rtPaintHist(h) {
   el.textContent = "历史成交 " + n + " 笔 · " + (h.first_day || "").slice(2) + " ~ " +
     (h.last_day || "").slice(2);
   el.className = "rt-hist";
-  el.title = "成交 " + n + " 笔 / 委托 " + (h.orders || 0) + " 笔 / 流水 " + (h.flows || 0) +
-    " 条" + (h.at ? "\n最近拉取 " + h.at : "") + (h.msg ? "\n" + h.msg : "");
+  el.dataset.tip = "成交 " + n + " 笔 / 委托 " + (h.orders || 0) + " 笔 / 流水 " + (h.flows || 0) +
+    " 条" + (h.at ? " · 最近拉取 " + h.at : "") + (h.msg ? " · " + h.msg : "");
 }
 
 async function rtLoad() {
@@ -1734,7 +1869,7 @@ function rtRiskPaint(b) {
       const h = Math.max(2, Math.min(100, u / max * 100));
       const tip = x.date + " · 使用率 " + f(u, 0) + "% · 合计 " + f(x.total) +
         "% · " + (x.n_pos || 0) + " 只持仓";
-      return '<i class="' + (u > 100 ? "over" : "") + '" style="height:' + h + '%" title="' +
+      return '<i class="' + (u > 100 ? "over" : "") + '" style="height:' + h + '%" data-tip="' +
         esc(tip) + '"></i>';
     }).join("");
     chart = '<div class="rt-bars">' + bars + "</div>" +
@@ -2469,8 +2604,11 @@ function stkRenderHist() {
   }
   el.innerHTML = list.map((r) => {
     const on = r.id === STK.id;
-    return '<div class="stk-hrow' + (on ? " on" : "") + '">' +
+    const cur = r.code === STK.code;
+    return '<div class="stk-hrow' + (on ? " on" : "") + (cur ? " cur" : "") + '">' +
       '<button type="button" class="stk-hopen" data-id="' + r.id + '">' +
+        '<span class="stk-hname">' + esc(String(r.name || r.code || "")) +
+          '<i>' + esc(String(r.code || "")) + "</i></span>" +
         "<b>" + esc(String(r.at || "").slice(5, 16)) + "</b>" +
         '<i class="stk-tag ' + (r.mode === "ai" ? "ai" : "local") + '">' +
           (r.mode === "ai" ? "AI" : "本地") + "</i>" +
@@ -2478,7 +2616,7 @@ function stkRenderHist() {
           " · #" + (r.rank || "—") + "</em>" +
       "</button>" +
       '<button type="button" class="stk-hdel" data-del="' + r.id +
-        '" title="删除这条记录">×</button></div>';
+        '" data-tip="删除这条记录">×</button></div>';
   }).join("");
 }
 function stkPaint() {
@@ -2546,9 +2684,10 @@ function stkPaint() {
     $("#stkMode").className = "pill " + (STK.mode === "ai" ? "yes" : "warn");
   }
 }
-async function stkLoadReports(code) {
-  const q = code ? "?code=" + encodeURIComponent(code) : "";
-  const r = await api("/api/stock/reports" + q);
+/* 历史列表展示全部股票的记录：单只过滤会让「换股分析后前一只记录像丢了」，
+   而存库其实是全量按 id 倒序存的。每行带股票名/代码，点哪条读哪条。 */
+async function stkLoadReports() {
+  const r = await api("/api/stock/reports");
   if (r && r.ok) {
     STK.reports = r.items || [];
     stkRenderHist();
@@ -2564,13 +2703,10 @@ async function stkLoad() {
     return;
   }
   // 直接进页面：默认打开最近一次分析，不用先点历史才看到内容
-  await stkLoadReports("");
+  await stkLoadReports();
   const latest = (STK.reports || [])[0];
   if (!latest) { stkPaint(); return; }
   await stkOpen(latest.id);
-  // 历史列表收敛到这只股票，否则右侧列的是全站记录、左侧却是单只
-  await stkLoadReports(STK.code);
-  stkRenderHist();
 }
 
 /* 只取画像，不生成报告：快（一次快照读取），用于页面预加载与输入后即时回显 */
@@ -2592,7 +2728,7 @@ async function stkDetail(code, quiet) {
   const inp = $("#stkCode");
   if (inp) inp.value = r.code || "";
   stkPaint();
-  await stkLoadReports(r.code);
+  await stkLoadReports();
   return true;
 }
 async function stkAnalyze() {
@@ -2622,7 +2758,7 @@ async function stkAnalyze() {
     STK.warn = r.warning || "";
     $("#stkCode").value = r.detail.code;
     stkPaint();
-    await stkLoadReports(STK.code);
+    await stkLoadReports();
     toast(r.mode === "ai" ? "AI 分析完成，已存档" : "已用本地模板生成并存档", "ok");
   } catch (e) {
     toast("分析失败：" + (e.message || e), "err");
@@ -2655,7 +2791,7 @@ async function stkDelete(id) {
   const r = await api("/api/stock/reports/" + id, { method: "DELETE" });
   if (!r || !r.ok) { toast((r && r.error) || "删除失败", "err"); return; }
   if (STK.id === id) { STK.id = null; STK.report = ""; }
-  await stkLoadReports(STK.code);
+  await stkLoadReports();
   stkPaint();
   toast("已删除这条分析记录", "ok");
 }
@@ -2666,7 +2802,7 @@ async function stkClear() {
   if (!r || !r.ok) { toast((r && r.error) || "清空失败", "err"); return; }
   STK.id = null;
   STK.report = "";
-  await stkLoadReports(STK.code);
+  await stkLoadReports();
   stkPaint();
   toast("已清空该股记录", "ok");
 }
@@ -2699,6 +2835,15 @@ const SCR_FACTOR_LABELS = {
   vol_ratio: "量比5/20", amount_ratio: "额比5/20", turnover: "换手率%",
   ind_mom20: "行业20日动能%", ind_rel20: "行业内相对动量%"
 };
+/* 展开行左栏的因子按语义分 5 列：「基本信息」排第一，后面 4 组量价因子，
+   宽屏一行排满。这里的 key 必须完整覆盖 SCR_FACTOR_LABELS 且不重复。
+   窄屏由 CSS auto-fit 自动折行，别写死 5 列媒体查询。 */
+const SCR_FACTOR_GROUPS = [
+  { title: "动量与趋势", keys: ["ret1", "mom5", "mom20", "mom60", "dist_ma60", "ma_dev", "macd_hist", "dd20"] },
+  { title: "波动与位置", keys: ["rsi14", "boll_pos", "vol20", "vol60", "amp20"] },
+  { title: "量能", keys: ["vol_ratio", "amount_ratio", "turnover"] },
+  { title: "行业相对", keys: ["ind_mom20", "ind_rel20"] }
+];
 const NEUTRAL_LABEL = {
   industry: "行业中性", "industry+size": "行业+市值中性", none: "不中性化", "": "—"
 };
@@ -2974,8 +3119,8 @@ async function pipePoll() {
       : (left.length ? ("数据链已更新；仍有待办：" + left[0].text)
         : "数据链已更新到最新"), bad.length ? "err" : "ok");
     await screenStatus();
-    // 数据链更新完，快照数据日也跟着变了；勾选保持不变，服务端会按数据日判断能否复用
-    autoLoad();          // 手动/定时跑完后，把「上次执行」和「下次时间」一起刷掉
+    // 数据链更新完，快照数据日也跟着变了；勾选保持不变，服务端会按数据日判断能否复用。
+    // 旧定时任务 UI 已整体搬到数据中枢，这里再拉 /api/screen/scheduler 是死请求。
   }
 }
 
@@ -3110,7 +3255,9 @@ async function screenStatus() {
   $("#scrHint").textContent = "快照 " + (sn.loaded ? sn.rows + " 行 / " + (sn.date_max || "—") : "无") +
     " · 训练集 " + (ds.loaded ? ds.rows + " 行" : "无");
   pipeLoad();          // 顺带检查四段数据链是否跟上，过期就在顶栏亮个提醒
-  sideTodoLoad(true);  // 左下角待办：行情/快照/训练集/模型/行业缺什么（这里已有最新状态，强制刷新）
+  // 不再 force：init 已经查过一次，这里强制刷新会让 data/hub 与 universe 各请求两轮；
+  // sideTodoLoad 自带 60 秒节流，真有变化两分钟内会补上。
+  sideTodoLoad();
   return r;
 }
 function scrLocalReason(x) {
@@ -3123,41 +3270,76 @@ function scrLocalReason(x) {
 }
 function indCell(x) {
   const name = x.industry || "未分类";
-  const r = (x.ind_rank == null) ? "" : '<i title="本行业内打分百分位">' +
+  const r = (x.ind_rank == null) ? "" : '<i data-tip="本行业内打分百分位">' +
     Math.round(Number(x.ind_rank) * 100) + "%</i>";
   return '<td class="ind-cell"><span>' + esc(name) + "</span>" + r + "</td>";
 }
+function scrFacItem(label, value) {
+  return '<div class="scr-fac-item"><span>' + label + "</span><b>" + value + "</b></div>";
+}
 function scrDetailHtml(x) {
-  const bits = Object.keys(SCR_FACTOR_LABELS).map((k) =>
-    "<div>" + SCR_FACTOR_LABELS[k] + "：<b>" + scrFmt(x[k], 3) + "</b></div>").join("");
+  /* 展开行 = 左右两栏：左栏「因子明细 5 列 + 当日分时」上下叠，
+     右栏「空头辩护」独占整个右侧、从顶到底；底部操作行。
+     三块都直接铺在展开行的灰底上，不套白底圆角容器；
+     头部标识条（代码 / 名称 / chip）不显示，那些信息候选榜表格行里本来就有。
+     右侧辩护不设滚动，理由全部自适应展开。 */
+  const facGroups = SCR_FACTOR_GROUPS.map((g) =>
+    '<div class="scr-fac-group"><h5>' + g.title + "</h5>" +
+    g.keys.map((k) => scrFacItem(SCR_FACTOR_LABELS[k], scrFmt(x[k], 3))).join("") + "</div>").join("");
   const rk = (x.ind_rank == null) ? "—" :
-    ("行业内前 " + Math.max(1, Math.round((1 - Number(x.ind_rank)) * 100)) + "%（共 " +
-      (x.ind_n || "?") + " 只样本）");
-  const bearBits = (x.bear_case && x.bear_case.length)
-    ? '<div class="bear-inline"><b class="bear-inline-h">空头辩护</b>' +
-      x.bear_case.map((b) => '<div class="bear-li"><span>' + esc(b.point) + "</span>" +
-        (b.trigger ? "<i>触发：" + esc(b.trigger) + "</i>" : "") +
-        (b.watch ? "<i>观察：" + esc(b.watch) + "</i>" : "") + "</div>").join("") +
-      (x.llm_reason ? '<p class="note" style="margin:4px 0 0">裁决：' + esc(x.llm_reason) + "</p>" : "") +
+    ("前 " + Math.max(1, Math.round((1 - Number(x.ind_rank)) * 100)) + "% / " +
+      (x.ind_n || "?") + " 只");
+  const metaGroup = '<div class="scr-fac-group"><h5>基本信息</h5>' + [
+    scrFacItem("板块", esc(x.market || "—")),
+    scrFacItem("行业", esc(x.industry || "待补齐")),
+    scrFacItem("行业内", esc(rk)),
+    scrFacItem("基准分", scrFmt(x.base_score, 3)),
+    scrFacItem("数据日", esc(x.date || "—"))
+  ].join("") + "</div>";
+
+  const bc = x.bear_case || [];
+  const dropped = x.verdict === "drop";
+  const bearBlock = bc.length
+    ? '<div class="scr-bear-plain">' +
+      '<div class="scr-block-h"><h4>空头辩护</h4>' +
+      '<span class="scr-bear-verdict ' + (dropped ? "drop" : "keep") + '">' +
+      (dropped ? "否决" : "保留") + " · " + bc.length + " 条</span></div>" +
+      '<ol class="scr-bear-list">' + bc.map((b) =>
+        '<li><p>' + esc(b.point) + "</p>" +
+        ((b.trigger || b.watch)
+          ? '<div class="scr-bear-meta">' +
+            (b.trigger ? "<span><i>触发</i>" + esc(b.trigger) + "</span>" : "") +
+            (b.watch ? "<span><i>观察</i>" + esc(b.watch) + "</span>" : "") +
+            "</div>" : "") + "</li>").join("") + "</ol>" +
+      (x.llm_reason ? '<p class="scr-bear-judge"><b>裁决</b>' + esc(x.llm_reason) + "</p>" : "") +
       "</div>"
-    : "";
+    : '<div class="scr-bear-plain is-empty">' +
+      '<div class="scr-block-h"><h4>空头辩护</h4></div>' +
+      '<p class="scr-dim scr-bear-none">本批未生成辩护理由。</p></div>';
+
   return '<tr class="scr-detail-row" data-detail="' + x.code + '"><td colspan="11">' +
-    '<div class="scr-detail-grid">' + bits +
-    "<div>板块：<b>" + esc(x.market || "—") + "</b></div>" +
-    "<div>行业：<b>" + esc(x.industry || "待补齐") + "</b></div>" +
-    "<div>行业内排名：<b>" + esc(rk) + "</b></div>" +
-    "<div>基准分：<b>" + scrFmt(x.base_score, 3) + "</b></div>" +
-    "<div>数据日：<b>" + esc(x.date || "—") + "</b></div></div>" + bearBits +
-    '<div class="scr-detail-chart">' +
-    '<div class="scr-ch-h"><b>' + esc(x.code) + " " + esc(x.name) + "</b>" +
-      '<span class="scr-ch-note" title="表格收盘价已换算成真实价（未复权），与分时图可直接对照；因子与收益按后复权口径计算">当日分时 · 真实价</span>' +
-      '<span class="scr-ch-q" id="scrChQ_' + x.code + '">读取分时…</span></div>' +
-    '<div id="scrCh_' + x.code + '" class="chart scr-mini"></div></div>' +
-    '<div class="scr-detail-actions">' +
-    '<button class="opb" data-act="chart" data-code="' + x.code + '">完整行情 ↗</button>' +
-    '<button class="opb" data-act="backtest" data-code="' + x.code + '">看这只票的回测</button>' +
-    '<button class="opb" data-act="pooladd" data-code="' + x.code + '" data-name="' + esc(x.name) +
-    '">加入股票池</button></div></td></tr>';
+    '<div class="scr-detail">' +
+      '<div class="scr-detail-cols">' +
+        '<div class="scr-detail-left">' +
+          '<section class="scr-line-factor">' +
+            '<div class="scr-block-h"><h4>因子明细</h4>' +
+              '<span class="scr-block-note">18 项 · 后复权口径</span></div>' +
+            '<div class="scr-fac-groups">' + metaGroup + facGroups + "</div>" +
+          "</section>" +
+          '<section class="scr-line-chart">' +
+            '<div class="scr-block-h"><h4>日分时</h4>' +
+              '<span class="scr-ch-q" id="scrChQ_' + x.code + '">读取分时…</span></div>' +
+            '<div id="scrCh_' + x.code + '" class="chart scr-mini"></div>' +
+          "</section>" +
+        "</div>" + bearBlock +
+      "</div>" +
+      '<div class="scr-detail-foot">' +
+        '<button class="opb" data-act="chart" data-code="' + x.code + '">完整行情 ↗</button>' +
+        '<button class="opb" data-act="backtest" data-code="' + x.code + '">看这只票的回测</button>' +
+        '<button class="opb" data-act="pooladd" data-code="' + x.code + '" data-name="' + esc(x.name) +
+        '">加入股票池</button>' +
+        '<span class="scr-foot-note">收盘为真实价 · 因子按后复权口径</span>' +
+      "</div></div></td></tr>";
 }
 function renderScrRows() {
   // innerHTML 重绘会冲掉容器，先释放旧的分时图实例，避免挂在游离节点上
@@ -3178,17 +3360,17 @@ function renderScrRows() {
     // 辩护结论列：数据来自 BEAR.data（工作台跑完辩护就存在内存里），
     // 与选股记录页共用同一个 bearCellHtml，两边显示一致。
     const bm = bmap.get(String(x.code));
-    return "<tr><td><span class='rank'>" + (x.rank_llm || x.rank) + "</span></td>" +
+    return '<tr data-code="' + x.code + '"><td><span class="rank">' + (x.rank_llm || x.rank) + "</span></td>" +
       '<td><button type="button" class="codelink" data-code="' + x.code +
       '" aria-label="展开 ' + esc(x.name) + ' 的因子详情">' + x.code + "</button></td>" +
       "<td>" + esc(x.name) + "</td>" + indCell(x) +
-      "<td title=\"" + (x.close_real != null && Math.abs(x.close_real - x.close) > 0.01
+      "<td data-tip=\"" + (x.close_real != null && Math.abs(x.close_real - x.close) > 0.01
         ? "真实价；后复权口径 " + scrFmt(x.close)
         : "选股日收盘价") + "\">" + scrFmt(x.close_real == null ? x.close : x.close_real) + "</td>" +
       '<td class="' + (x.pct == null ? "" : signCls(x.pct)) + '">' + pctCell + "</td>" +
       bearCellHtml(bm) +
       '<td class="score">' + scrFmt(x.score, 3) + "</td>" +
-      "<td>" + scrFmt(x.mom20, 1) + "%</td>" +
+      "<td>" + fmtPct(x.mom20, { dp: 1, sign: true, cls: true }) + "</td>" +
       (x.llm_score == null
         ? (SCR.llmMode === "local"
           ? '<td><span class="pill no">本地</span></td>'
@@ -3225,8 +3407,23 @@ async function scrChartLoad(code) {
   c.resize();
 }
 function toggleScrDetail(code) {
-  if (SCR.detail.has(code)) SCR.detail.delete(code); else SCR.detail.add(code);
-  renderScrRows();
+  // 只动被点的那一行：以前是 renderScrRows() 整表重绘，展开第 2 只时会把
+  // 第 1 只已经画好的分时 dispose 掉再重新请求，滚动位置也会跳回顶部。
+  const row = document.querySelector('#scrBody tr[data-code="' + code + '"]');
+  if (!row) { renderScrRows(); return; }
+  if (SCR.detail.has(code)) {
+    SCR.detail.delete(code);
+    const det = row.nextElementSibling;
+    if (det && det.classList.contains("scr-detail-row")) det.remove();
+    const c = S.charts["scrCh_" + code];
+    if (c) { try { c.dispose(); } catch (e) {} delete S.charts["scrCh_" + code]; }
+    return;
+  }
+  const x = (SCR.llmRows || SCR.candidates).find((y) => String(y.code) === String(code));
+  if (!x) { renderScrRows(); return; }
+  SCR.detail.add(code);
+  row.insertAdjacentHTML("afterend", scrDetailHtml(x));
+  scrChartLoad(code);
 }
 /* 「重新选股」彩虹流光：只有「今天还没选过 + 榜单数据已过期」才提醒。
    不能只看数据日（as_of）距今多久——行情天然滞后一两个交易日，
@@ -3256,11 +3453,25 @@ function scrMarkStale(on) {
   const btn = $("#btnScrRun");
   if (!btn) return;
   btn.classList.toggle("stale", !!on);
-  btn.title = on ? "今天还没留下选股记录，且榜单数据已超过 24 小时，建议重新选股留档" : "";
+  btn.dataset.tip = on ? "今天还没留下选股记录，且榜单数据已超过 24 小时，建议重新选股留档" : "";
 }
 /** 首屏恢复：直接显示上一次落盘的候选，不重算。
     数据是否过期交给「重新选股」按钮的彩虹流光提示（scrIsStale），
     而不是每次打开页面都默默重建全市场快照。 */
+/* 展示价来源：本地快照（几秒~几分钟前）/ 后复权回退 / 两者混合。
+   用户需要知道「这个价格能不能直接和行情软件对」，不能默默换口径。 */
+function scrPriceNote(r) {
+  const el = $("#scrPriceTag");
+  if (!el) return;
+  const src = r && r.price_source;
+  const at = String((r && r.price_at) || "");
+  const hm = at.length >= 16 ? " " + at.slice(11, 16) : "";
+  el.textContent = src === "spot" ? ("价格来源：本地快照" + hm)
+    : src === "mixed" ? ("价格来源：本地快照" + hm + "（部分为后复权）")
+    : src === "hfq" ? "价格来源：后复权（未取到实时快照）"
+    : "";
+}
+
 async function screenResume() {
   let r;
   try { r = await api("/api/screen/resume"); }
@@ -3269,6 +3480,7 @@ async function screenResume() {
 
   SCR.last = r;
   SCR.candidates = r.candidates || [];
+  scrPriceNote(r);
   SCR.llmRows = null; SCR.llmMode = "";
   SCR.detail.clear();
   renderScrRows();
@@ -3309,6 +3521,10 @@ async function screenResume() {
 
 async function screenRun(silent, btn) {
   if (SCR.busy) return;
+  if (!silent && !numOk(["scrTopN", "scrLimit", "scrMaxSymbols"])) {
+    toast("先修正标红的参数，再重新选股", "err");
+    return;
+  }
   SCR.busy = true;
   if (silent) {
     // 首屏静默自动出数：8 秒仍无结果就显式给出重试入口，避免停在「正在生成…」
@@ -3346,13 +3562,17 @@ async function screenRun(silent, btn) {
       $("#scrSampleN").textContent = "0";
       $("#scrHeadline").textContent = "本期没有可用候选：" + (r.error || "请先预热行情");
       scrMarkStale(false);
-      $("#scrEmptyText").textContent = "暂无候选。请先到「股票池 → 全 A 股名单」预热行情，再回来选股。";
+      errBox($("#scrEmptyText"),
+        "选股失败：" + (r.error || "未知错误") +
+        "。可以直接重试；若提示数据不足，先到「股票池 → 全 A 股名单」预热行情。",
+        { retry: () => screenRun(false) });
       $("#scrEmpty").style.display = "block";
       $("#scrEmptyActions").style.display = "flex";
       toast("选股失败：" + (r.error || "未知错误"), "err");   // 自动出数失败也要让用户看见
       return;
     }
     SCR.last = r; SCR.candidates = r.candidates || []; SCR.llmRows = null; SCR.llmMode = "";
+    scrPriceNote(r);
     // 「今天选过」以真正落盘的记录为准：首屏静默出数（record=false）只是把界面填满，
     // 不算用户的一次选股，否则每次打开页面都会把彩虹提醒永久压掉。
     const pickDay = String(r.last_pick_at || "").slice(0, 10);
@@ -3392,7 +3612,7 @@ async function screenRun(silent, btn) {
     if (r.snapshot_reused) tg.push("复用本期截面");
     tagEl.textContent = tg.join(" · ");
     tagEl.classList.toggle("warn", !!r.is_historical || qlag > 0);
-    tagEl.title = r.snapshot_reused
+    tagEl.dataset.tip = r.snapshot_reused
       ? "截面数据日已是最新交易日，且股票范围、样本上限都与请求一致，直接复用磁盘快照；改了其中任一项都会自动重建"
       : "";
     SCR.noteBase = r.score_label + " · " +
@@ -3418,7 +3638,11 @@ async function screenSnapshot(btn) {
     const p = scrRunParams();
     sysTaskStart("snapshot", "生成横截面快照");
     let r;
-    try { r = await post("/api/screen/snapshot", { scope: p.scope, as_of: p.as_of, limit: p.limit }); }
+    // meta_only：这里只读 count / date_max / warning，不需要 5000+ 行、约 4MB 的 rows
+    try {
+      r = await post("/api/screen/snapshot",
+        { scope: p.scope, as_of: p.as_of, limit: p.limit, meta_only: true });
+    }
     finally { sysTaskEnd("snapshot"); }
     if (!r.ok) { toast("快照失败：" + (r.error || "未知错误"), "err"); return; }
     toast("快照完成：" + r.count + " 只 / 截至 " + r.date_max +
@@ -3589,7 +3813,7 @@ function renderFunnel(fn, ind, picked) {
   shown.forEach((s, i) => {
     if (i) arrows.push('<span class="scr-fn-arrow">›</span>');
     const dropped = s.dropped ? ('<em>−' + s.dropped + "</em>") : "";
-    arrows.push('<span class="scr-fn-step' + (s.enabled ? "" : " off") + '" title="' +
+    arrows.push('<span class="scr-fn-step' + (s.enabled ? "" : " off") + '" data-tip="' +
       esc(s.note || "") + '"><b>' + s.after + "</b>" + dropped + "<i>" + esc(s.name) + "</i></span>");
   });
   arrows.push('<span class="scr-fn-arrow">›</span>');
@@ -3845,10 +4069,10 @@ function pkRow(b, i, on) {
   // 「至今」列：没有新行情时给明确的「暂无」，不是「待更新」。
   // 只有 stale（行情真的落后于数据日）才值得提醒。
   const nowCell = st === "fresh" ? pkPct(b.avg_chg)
-    : st === "same" ? '<span class="pk-na" title="行情仍停在数据日，还没有后续涨跌">暂无</span>'
-    : '<span class="pk-na warn" title="行情落后于数据日，建议先更新行情">待更新</span>';
+    : st === "same" ? '<span class="pk-na" data-tip="行情仍停在数据日，还没有后续涨跌">暂无</span>'
+    : '<span class="pk-na warn" data-tip="行情落后于数据日，建议先更新行情">待更新</span>';
   return '<button type="button" class="pk-row' + (on ? " on" : "") + side + '" data-i="' + i +
-    '" title="' + esc(tip) + '">' +
+    '" data-tip="' + esc(tip) + '">' +
     '<span class="pk-c1">' + esc(dataDay.slice(5)) + "</span>" +
     '<span class="pk-c2">' + esc(recAt ? recAt.slice(5, 10) : "—") + "</span>" +
     '<span class="pk-c3">' + b.count + "</span>" +
@@ -3868,6 +4092,43 @@ function pkSorted(b) {
   return arr;
 }
 
+/* 切换「按排名/按涨跌」只重排，不重建详情：
+   以前直接 pkDetail()，会 dispose 分时图、重新请求 archive 与分时，表格也闪一下。
+   这里把「主行 + 它下面的分时行」当成一对整体移动，图表实例跟着 DOM 走。 */
+function pkResort(b) {
+  const det = $("#pkDetail");
+  const tb = det && det.querySelector(".pk-tbl tbody");
+  if (!tb) { pkDetail(b); return; }
+  const pairs = [];
+  Array.from(tb.children).forEach((tr) => {
+    if (tr.classList.contains("pk-cr")) {
+      if (pairs.length) pairs[pairs.length - 1].push(tr);
+    } else {
+      pairs.push([tr]);
+    }
+  });
+  const order = new Map(pkSorted(b).map((p, i) => [String(p.code), i]));
+  const idx = (tr) => {
+    const v = order.get(tr.dataset.code);
+    return v == null ? 9e9 : v;
+  };
+  pairs.sort((A, B) => idx(A[0]) - idx(B[0]));
+  pairs.forEach((pair) => pair.forEach((tr) => tb.appendChild(tr)));
+
+  // 柱状图跟着同一顺序重排（每根柱都带 data-code）
+  const bars = det.querySelector(".pk-bars");
+  if (bars) {
+    const byCode = new Map(Array.from(bars.children).map((el) => [el.dataset.code, el]));
+    pkSorted(b).forEach((p) => {
+      const el = byCode.get(String(p.code));
+      if (el) bars.appendChild(el);
+    });
+  }
+  $$("#pkDetail .pk-sbtn").forEach((btn) => {
+    btn.classList.toggle("on", btn.dataset.sort === PK.sort);
+  });
+}
+
 function pkDetail(b) {
   const det = $("#pkDetail");
   if (!b) { det.innerHTML = ""; return; }
@@ -3881,11 +4142,12 @@ function pkDetail(b) {
   // 一根柱一只股票，以中线为 0：一眼看出这次选股是多空混杂还是集体同向
   const bars = picks.map((p) => {
     const nm = p.code + " " + (p.name || "");
-    if (p.chg == null) return '<span class="pk-bw" title="' + esc(nm + " 待更新") + '"></span>';
+    const dc = ' data-code="' + esc(p.code) + '"';
+    if (p.chg == null) return '<span class="pk-bw"' + dc + ' data-tip="' + esc(nm + " 待更新") + '"></span>';
     const v = Number(p.chg);
     const h = Math.max(2, Math.abs(v) / maxAbs * 38);
     const cls = v > 0 ? "up" : (v < 0 ? "down" : "flat");
-    return '<span class="pk-bw" title="' + esc(nm + "  " + (v > 0 ? "+" : "") + v.toFixed(2) + "%") +
+    return '<span class="pk-bw"' + dc + ' data-tip="' + esc(nm + "  " + (v > 0 ? "+" : "") + v.toFixed(2) + "%") +
       '"><i class="' + cls + '" style="height:' + h.toFixed(1) + 'px"></i></span>';
   }).join("");
 
@@ -3915,7 +4177,7 @@ function pkDetail(b) {
       '<button class="pk-sbtn' + (PK.sort !== "chg" ? " on" : "") + '" data-sort="rank">按排名</button>' +
       '<button class="pk-sbtn' + (PK.sort === "chg" ? " on" : "") + '" data-sort="chg">按涨跌</button>' +
       "</div>" +
-    '<button class="pk-del" data-del="1" title="删除这一批选股记录（不可恢复）">删除本批</button>' +
+    '<button class="pk-del" data-del="1" data-tip="删除这一批选股记录（不可恢复）">删除本批</button>' +
     "</div>";
 
   const kpis = '<div class="pk-kpis">' +
@@ -3939,7 +4201,7 @@ function pkDetail(b) {
     const tr = '<tr class="rowlink pk-line' + (open ? " on" : "") + '" data-code="' + esc(x.code) +
       '" data-name="' + esc(x.name || "") + '"><td class="pk-rk">' +
       (x.rank == null ? '<span class="pk-na">—</span>' : x.rank) + "</td>" +
-      '<td><button class="pk-link" title="展开当日分时">' + esc(x.code) + "</button></td>" +
+      '<td><button class="pk-link" data-tip="展开当日分时">' + esc(x.code) + "</button></td>" +
       "<td>" + esc(x.name) + "</td>" +
       bearCellHtml(merged) +
       '<td class="pk-r">' + pkPct(x.chg) + "</td>" +
@@ -3954,7 +4216,7 @@ function pkDetail(b) {
     // 展开行就地插在这只股票下面：点哪儿看哪儿，不用滚到页面另一头找图
     return tr + '<tr class="pk-cr"><td colspan="12"><div class="pk-ch">' +
       '<div class="pk-ch-h"><b>' + esc(x.code) + " " + esc(x.name) + "</b>" +
-        '<span class="pk-ch-note" title="表格价格已换算成真实价（未复权），与分时图可直接对照；涨跌幅按后复权同口径计算">当日分时 · 真实价</span>' +
+        '<span class="pk-ch-note" data-tip="表格价格已换算成真实价（未复权），与分时图可直接对照；涨跌幅按后复权同口径计算">日分时</span>' +
         '<span class="pk-ch-q" id="pkChQ">读取分时…</span>' +
         '<button class="btn sec sm" data-jump="' + esc(x.code) + '">行情走势 ↗</button></div>' +
       '<div id="pkCh" class="chart pk-mini"></div></div></td></tr>';
@@ -4019,6 +4281,8 @@ function pkSelect(i) {
   PK.open = "";   // 换了批次，上一批展开的那只不在这一批里，收起
   PK.bear = null; // 辩护结论按批次缓存，换批必须重取
   PK.bearKey = "";
+  PK.arch = null; // 决策档案同理，换批重新取
+  PK.archKey = "";
   const kids = $("#pkList").children;
   for (let j = 0; j < kids.length; j++) kids[j].classList.toggle("on", j === i);
   pkDetail(bs[i]);
@@ -4075,7 +4339,7 @@ function renderPicks(r) {
     if (del) { pkDelete(bs[PK.idx]); return; }
     const s = e.target.closest("[data-sort]");
     if (s) {
-      if (PK.sort !== s.dataset.sort) { PK.sort = s.dataset.sort; pkDetail(bs[PK.idx]); }
+      if (PK.sort !== s.dataset.sort) { PK.sort = s.dataset.sort; pkResort(bs[PK.idx]); }
       return;
     }
     const jump = e.target.closest("[data-jump]");
@@ -4442,6 +4706,15 @@ function initTerms() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { _termPin = false; hideTerm(true); closeTermModal(); closeDrawer(); }
   });
+  // 键盘 Tab 到「?」图标或术语时也弹出气泡（原来只有鼠标悬停/点击能看）
+  document.addEventListener("focusin", (e) => {
+    const el = e.target.closest && e.target.closest(SEL);
+    if (el) showTerm(el);
+  });
+  document.addEventListener("focusout", (e) => {
+    const el = e.target.closest && e.target.closest(SEL);
+    if (el && !_termPin) hideTerm();
+  });
   window.addEventListener("scroll", () => { if (!_termPin) hideTerm(true); }, true);
 }
 /* ---------------- 顶栏系统状态灯 ----------------
@@ -4457,9 +4730,79 @@ const SYSLED = { timer: null, data: null, busy: false };
    登记后绿点变转圈，页面不再遮罩、可以继续操作；请求结束立即撤下。 */
 const LOCALTASK = new Map();
 
+/* 任务启动引导动画：中心厚重转圈；短任务（<0.75s）在原地转完淡出，
+   长任务则缩小飞向右上角状态灯，告诉用户「进度在那盏灯看」。
+   全程 pointer-events:none 不锁页面；重复触发时重启动画，不会叠多层。
+   用 Web Animations API 而非 CSS 关键帧：终点坐标要按状态灯的 getBoundingClientRect
+   实时算（顶栏在窄屏是抽屉/顶栏，位置会变），CSS 写死 translate 会飞偏。 */
+const BEACON = { active: false, anim: null, timer: null, box: null, core: null, led: null, key: "", dx: 0, dy: 0 };
+const BEACON_SPIN_MS = 750;   // 判断阈值：这段时间内结束 = 短任务，原地收尾
+function beaconStop(ping) {
+  if (!BEACON.active) return;
+  BEACON.active = false;
+  clearTimeout(BEACON.timer);
+  try { if (BEACON.anim) BEACON.anim.cancel(); } catch (e) {}
+  const box = BEACON.box, core = BEACON.core, led = BEACON.led;
+  if (box) {
+    box.classList.remove("on");
+    if (box.getAnimations) box.getAnimations().forEach((a) => { try { a.cancel(); } catch (e) {} });
+  }
+  if (core) core.style.opacity = "0";
+  if (ping && led) {
+    led.classList.remove("beacon-ping");
+    void led.offsetWidth;
+    led.classList.add("beacon-ping");
+    setTimeout(() => led.classList.remove("beacon-ping"), 900);
+  }
+}
+function beaconFly() {
+  const box = BEACON.box, core = BEACON.core, dx = BEACON.dx, dy = BEACON.dy;
+  // core 只做位移+缩放；旋转交给 .tb-ring 自身的 SVG 圆头弧线动画。
+  const anim = core.animate([
+    { transform: "translate(-50%,-50%) scale(1)", opacity: 1, offset: 0 },
+    { transform: `translate(calc(-50% + ${dx}px),calc(-50% + ${dy}px)) scale(.42)`, opacity: .9, offset: 1 }
+  ], { duration: 400, easing: "cubic-bezier(.45,.02,.28,1)", fill: "forwards" });
+  BEACON.anim = anim;
+  box.animate([{ opacity: 1, offset: .45 }, { opacity: 0, offset: 1 }],
+    { duration: 400, easing: "ease-in", fill: "forwards" });
+  BEACON.timer = setTimeout(() => beaconStop(true), 400);
+}
+function beaconFinishShort() {
+  // 短任务：任务已完成，不必引导看灯——圆圈原地淡出收尾
+  const core = BEACON.core;
+  BEACON.anim = core.animate([
+    { transform: "translate(-50%,-50%) scale(1)", opacity: 1 },
+    { transform: "translate(-50%,-50%) scale(.88)", opacity: 0 }
+  ], { duration: 240, easing: "ease-in", fill: "forwards" });
+  BEACON.timer = setTimeout(() => beaconStop(false), 240);
+}
+function taskBeacon(key) {
+  const box = $("#taskBeacon"), core = box && box.querySelector(".tb-core");
+  const led = $("#sysLed");
+  if (!box || !core || !led || !core.animate) return;
+  if (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  beaconStop(false);   // 重复触发：撤掉上一次的动画/定时器，不叠加
+  const lr = led.getBoundingClientRect();
+  BEACON.box = box; BEACON.core = core; BEACON.led = led;
+  BEACON.key = String(key);
+  BEACON.dx = (lr.left + lr.width / 2) - window.innerWidth / 2;
+  BEACON.dy = (lr.top + lr.height / 2) - (window.innerHeight * 0.48);
+  box.classList.add("on");
+  core.style.opacity = "";
+  core.style.transform = "";
+  BEACON.active = true;
+  // 先在中间转圈；到决策点看这次任务是否还在跑，再决定飞不飞
+  BEACON.timer = setTimeout(() => {
+    if (!BEACON.active) return;
+    if (LOCALTASK.has(BEACON.key)) beaconFly();
+    else beaconFinishShort();
+  }, BEACON_SPIN_MS);
+}
+
 function sysTaskStart(key, label) {
   LOCALTASK.set(String(key), String(label || key));
   sysLedPaint(SYSLED.data);
+  taskBeacon(key);
 }
 function sysTaskEnd(key) {
   LOCALTASK.delete(String(key));
@@ -4486,16 +4829,15 @@ function sysLedPaint(d) {
     const pct = (d.overall == null) ? 0 : Math.max(0, Math.min(1, Number(d.overall)));
     fill.style.strokeDashoffset = String(C * (1 - pct));
     // 悬停内容走专用进度条气泡（showTerm 里的 data-led 分支），不再塞纯文本
-    btn.title = "";
     btn.classList.add("term");
   } else {
     fill.style.strokeDashoffset = String(C);   // 清空圆环
     btn.classList.remove("term");
     if (!local.length) {
-      delete btn.dataset.tip;
-      delete btn.dataset.tipName;
+      // 统一走 data-tip：同时设 title 会让自定义气泡和原生 tooltip 叠成两层
       const rec = ((d && d.recent) || [])[0];
-      btn.title = (rec
+      btn.dataset.tipName = "系统状态";
+      btn.dataset.tip = (rec
         ? ("系统运行正常 · 最近一次：" + (rec.kind || "") + " " +
            (rec.ok ? "成功" : "失败") + " " + String(rec.finished || "").slice(5, 16))
         : "系统运行正常") + " · 点击查看运行日志";
@@ -4505,7 +4847,6 @@ function sysLedPaint(d) {
   if (local.length) {
     btn.dataset.tipName = "正在执行";
     btn.dataset.tip = local.join("、");
-    btn.title = local.join("、");
   }
 }
 
@@ -5007,7 +5348,7 @@ async function indMembers(name) {
   $("#indMemberTag").textContent = name + " · " + r.count + " 只（有行情 " + r.cached + "）";
   $("#indMemEmpty").style.display = IND.members.length ? "none" : "block";
   $("#indMemBody").innerHTML = IND.members.map((x) =>
-    "<tr class='rowlink' data-code='" + esc(String(x.code).padStart(6, "0")) + "' title='点击查看走势'>" +
+    "<tr class='rowlink' data-tip='点击查看走势' data-code='" + esc(String(x.code).padStart(6, "0")) + "'>" +
     "<td>" + x.code + "</td><td>" + esc(x.name || "—") + "</td><td>" +
     (x.price === "" ? "—" : esc(x.price)) + "</td><td class='" +
     (x.pct === "" ? "" : signCls(Number(x.pct))) + "'>" +
@@ -5286,7 +5627,7 @@ function logRowHtml(x) {
   return '<tr class="log-row" data-logid="' + x.id + '">' +
     "<td>" + esc((x.at || "").slice(5, 19)) + "</td>" +
     '<td><span class="lv ' + esc(lv) + '">' + esc(LOG_LABEL[lv] || lv) + "</span></td>" +
-    '<td><span class="log-src' + (x.src === "ui" ? " ui" : "") + '" title="' +
+    '<td><span class="log-src' + (x.src === "ui" ? " ui" : "") + '" data-tip="' +
       esc(x.src || "") + '">' + esc(logSrcName(x.src)) + "</span></td>" +
     '<td class="log-msg">' + esc(x.msg || "") +
       (x.act ? '<span class="log-act">' + esc(x.act) + "</span>" : "") + det + "</td></tr>";
@@ -5303,7 +5644,22 @@ async function logLoad(reset) {
     const tb = $("#logBody");
     if (tb) {
       const html = items.map(logRowHtml).join("");
-      if (reset) tb.innerHTML = html; else tb.insertAdjacentHTML("beforeend", html);
+      if (reset) {
+        // 自动刷新每 30 秒整表覆盖一次；把已展开的行记下来，重绘后恢复，
+        // 否则用户正在看的异常栈会自己收起来。
+        const open = new Set($$("#logBody .log-row").filter((tr) => {
+          const d = tr.querySelector(".log-det");
+          return d && !d.hidden;
+        }).map((tr) => tr.dataset.logid));
+        tb.innerHTML = html;
+        open.forEach((id) => {
+          const tr = tb.querySelector('tr[data-logid="' + id + '"]');
+          const d = tr && tr.querySelector(".log-det");
+          if (d) { d.hidden = false; tr.classList.add("open"); }
+        });
+      } else {
+        tb.insertAdjacentHTML("beforeend", html);
+      }
     }
     LOG.offset += items.length;
     logFacets(d.facets);
@@ -5362,7 +5718,7 @@ function hubRunRow(r) {
     : r.ok ? '<span class="pipe-pill good">成功</span>'
     : '<span class="pipe-pill warn">失败</span>';
   const line = (names ? "<b>" + esc(names) + "</b>" : "") +
-    (detail ? '<small class="hub-detail' + (bad.length ? " bad" : "") + '" title="' +
+    (detail ? '<small class="hub-detail' + (bad.length ? " bad" : "") + '" data-tip="' +
       esc(detail) + '">' + esc(detail) + "</small>" : "");
   return "<tr><td>" + esc((r.started || "").slice(5, 16)) + "</td><td>" + esc(hubKind(r.kind, r.level)) +
     "</td><td>" + esc(hubTrigger(r.trigger)) + "</td><td>" + res + "</td><td>" + hubMs(r.ms) +
@@ -5428,7 +5784,7 @@ function hubValRow(x, total) {
   const badge = x.backup && x.state === "失败" ? ["sim", "备份未通"] : st;
   return '<div class="vsrc' + (x.enabled ? "" : " off") + '" data-key="' + esc(x.key) + '">' +
     '<span class="vsrc-no">' + (x.order || "") + "</span>" +
-    '<label class="vsrc-sw" title="参与 / 不参与"><input type="checkbox" data-vschk="' + esc(x.key) + '"' +
+    '<label class="vsrc-sw" data-tip="参与 / 不参与"><input type="checkbox" data-vschk="' + esc(x.key) + '"' +
       (x.enabled ? " checked" : "") + "><i></i></label>" +
     '<div class="vsrc-main"><b>' + esc(x.name) + "</b>" +
       "<small>" + esc(VAL_CAP[x.cap] || "") + " · " + (x.token ? "需 Token" : "免账号") +
@@ -5437,9 +5793,9 @@ function hubValRow(x, total) {
     '<span class="pill ' + badge[0] + '">' + esc(badge[1]) + "</span>" +
     '<div class="vsrc-ops">' +
       '<button class="btn sec xs" data-vsact="up" data-key="' + esc(x.key) + '"' +
-        (x.order <= 1 ? " disabled" : "") + ' title="上移">↑</button>' +
+        (x.order <= 1 ? " disabled" : "") + ' data-tip="上移">↑</button>' +
       '<button class="btn sec xs" data-vsact="down" data-key="' + esc(x.key) + '"' +
-        (x.order >= total ? " disabled" : "") + ' title="下移">↓</button>' +
+        (x.order >= total ? " disabled" : "") + ' data-tip="下移">↓</button>' +
       '<button class="btn sec xs" data-vsact="test" data-key="' + esc(x.key) + '">测试</button>' +
     "</div></div>";
 }
@@ -5603,7 +5959,9 @@ function packPoll() {
   PACK.timer = setTimeout(async () => {
     const s = await packLoad();
     if (s && s.running) { packPoll(); return; }
-    sysTaskEnd("pack");
+    // 行情包进度走后端 /api/tasks（状态灯环形进度），不占本地任务；
+    // 结束这里补一次轮询，让状态灯及时熄灭，别停在转圈。
+    sysLedPoll();
     if (s && PACK.autoDown && s.kind === "export" && s.result) {
       PACK.autoDown = false;
       packAutoDownload();
@@ -5616,8 +5974,9 @@ async function packExport() {
   const r = await post("/api/data/pack/export", { since: packSince() });
   if (!r.ok) { toast(r.error || "导出失败", "err"); return; }
   PACK.autoDown = true;
-  sysTaskStart("pack", "导出行情包");
-  toast("开始导出，完成后自动下载");
+  // 不登记本地任务：后端 datapack 已接入 /api/tasks，状态灯能读到百分比走环形进度。
+  sysLedPoll();
+  toast("开始导出，完成后自动下载（进度见右上角状态灯）");
   packPoll();
 }
 
@@ -5629,7 +5988,7 @@ function packImport(file) {
   bar.hidden = false;
   fi.style.width = "0%";
   msg.textContent = "上传中…";
-  sysTaskStart("pack", "导入行情包");
+  sysTaskStart("pack", "上传行情包");
   const fd = new FormData();
   fd.append("file", file);
   const xhr = new XMLHttpRequest();
@@ -5650,7 +6009,10 @@ function packImport(file) {
       packLoad();
       return;
     }
-    msg.textContent = "已开始合并，进度见上方";
+    // 上传完成 → 后端开始合并：撤下「上传中」本地任务，
+    // 合并进度改由 /api/tasks 里的 datapack 任务显示（状态灯环形进度）。
+    sysTaskEnd("pack");
+    msg.textContent = "已开始合并，进度见右上角状态灯";
     packPoll();
   };
   xhr.onerror = () => {
@@ -6107,12 +6469,12 @@ function fcRender(r) {
       return '<tr class="fc-row' + (on ? " on" : "") + '" data-fc="' + esc(x.key) + '">' +
         '<td><b>' + esc(x.name) + '</b>' +
           (x.external ? ' <span class="pill no">外部</span>' : "") +
-          ((x.n || 0) < 30 || (x.cover || 0) < 0.3 ? ' <span class="pill off" title="期数或覆盖率不足，IC 再高也不可信">样本少</span>' : "") +
+          ((x.n || 0) < 30 || (x.cover || 0) < 0.3 ? ' <span class="pill off" data-tip="期数或覆盖率不足，IC 再高也不可信">样本少</span>' : "") +
           '<i class="fc-k">' + esc(x.key) + "</i></td>" +
         '<td class="fc-g">' + esc(x.group || "—") + "</td>" +
         '<td class="' + signCls(Number(x.ic) || 0) + '">' + fcFmt(x.ic, 3) + "</td>" +
         "<td>" + fcFmt(x.icir, 3) + "</td>" +
-        '<td class="' + (tBad ? "fc-hl" : "") + '" title="|t|>2 才算统计显著">' + fcFmt(x.t, 2) + "</td>" +
+        '<td class="' + (tBad ? "fc-hl" : "") + '" data-tip="|t|>2 才算统计显著">' + fcFmt(x.t, 2) + "</td>" +
         "<td>" + (x.pos == null ? '<span class="dim">—</span>' : Number(x.pos).toFixed(0) + "%") + "</td>" +
         '<td class="' + signCls(Number(x.ls) || 0) + '">' + fcSigned(x.ls, 2) + "</td>" +
         '<td class="' + (tvBad ? "fc-hl" : "") + '">' + (x.turnover == null ? '<span class="dim">—</span>'
@@ -6292,15 +6654,16 @@ async function tgFill() {
 }
 
 async function tgRun(btn, useScreen, silent) {
+  if (!silent && !numOk(["tgCapital", "tgMaxW", "tgIndCap", "tgTurn",
+    "tgRisk", "tgAtr", "tgTopk", "tgDrop"])) {
+    toast("先修正标红的参数，再生成目标持仓", "err");
+    return;
+  }
   const work = async () => {
     const cfg = tgCfg();
     if (!cfg) { toast("单票上限要在 1%~99% 之间", "err"); return; }
     const picks = (useScreen && SCR.candidates.length) ? SCR.candidates : null;
-    if (!silent) {
-      sysTaskStart("portfolio", "计算目标持仓");
-      // 让实盘体检也使用同一份风险预算参数；保存失败不阻断生成
-      try { await post("/api/portfolio", { action: "config", config: cfg }); } catch (e) {}
-    }
+    if (!silent) sysTaskStart("portfolio", "计算目标持仓");
     let r;
     try {
       r = await post("/api/portfolio", {
@@ -6317,8 +6680,9 @@ async function tgRun(btn, useScreen, silent) {
     }
     TG.data = r;
     tgRender(r);
-    // 口径记下来：下次进来表单还是这套参数，不用每次重填
-    post("/api/portfolio", { action: "config", config: cfg });
+    // 口径记下来：下次进来表单还是这套参数，不用每次重填。
+    // 只写一次——过去生成前后各 POST 一遍，同一份配置发了两趟。
+    try { await post("/api/portfolio", { action: "config", config: cfg }); } catch (e) {}
     if (!silent) {
       toast("目标持仓：" + r.n_target + " 只 · 换手 " + r.turnover + "% · 费用 " +
         fmtMoney(r.fee) + "（" + r.fee_bps + " bp）", "ok");
@@ -6423,7 +6787,7 @@ function tgRender(r) {
     const max = Math.max.apply(null, rows.map((x) => Number(x.weight) || 0)) || 1;
     ind.innerHTML = rows.map((x) => {
       const over = r.ind_cap && x.weight / 100 > r.ind_cap + 0.005;
-      return '<div class="tg-ind-row" title="' + esc(x.industry) + " · " + fmtMoney(x.amount) + '">' +
+      return '<div class="tg-ind-row" data-tip="' + esc(x.industry) + " · " + fmtMoney(x.amount) + '">' +
         '<span class="tg-ind-k">' + esc(x.industry) + "</span>" +
         '<span class="tg-ind-bar"><i style="width:' + (Number(x.weight) / max * 100).toFixed(1) + "%" +
         (over ? ";background:var(--amber)" : "") + '"></i></span>' +
@@ -6881,9 +7245,18 @@ function bearCellHtml(x) {
 async function pkArchiveLoad(batch) {
   const box = $("#pkArch");
   if (!box || !batch) return;
+  const key = pkKey(batch);
+  // 档案按批次缓存：点行展开/切换排序都会重跑 pkDetail，但档案内容不会变，
+  // 没必要每次都重新请求（每份 payload 可能几 MB）。
+  if (PK.archKey === key && PK.arch != null) {
+    box.innerHTML = PK.arch;
+    return;
+  }
   const r = await api("/api/picks/archive?as_of=" + encodeURIComponent(batch.as_of || "") + "&limit=1");
   const it = r && r.ok ? (r.items || [])[0] : null;
   if (!it) {
+    PK.arch = "";
+    PK.archKey = key;
     box.innerHTML = "";
     return;
   }
@@ -6894,7 +7267,7 @@ async function pkArchiveLoad(batch) {
   const llm = p.llm || null;
   // 档案是「事后查证」用的，不是每次都要读的内容 —— 整个收进 details，
   // 和上面空头辩护保持同一种交互（点击展开），避免两块各自撑高页面。
-  box.innerHTML = '<details class="bear-fold pk-arch-fold">' +
+  const html = '<details class="bear-fold pk-arch-fold">' +
     '<summary>决策档案 · 这一批选了 ' + picks.length + " 只，漏斗淘汰 " + dropped + " 只" +
     (llm ? "，LLM 否决 " + ((llm.dropped == null) ? "—" : llm.dropped) + " 只" : "") +
     "</summary>" +
@@ -6907,6 +7280,9 @@ async function pkArchiveLoad(batch) {
         esc(((x.bears || [])[0] || {}).point || "") + "</li>").join("") + "</ul>"
       : '<p class="bear-none" style="margin:0">这一批没有记录否决理由。</p>') +
     "</div></details>";
+  PK.arch = html;
+  PK.archKey = key;
+  box.innerHTML = html;
 }
 
 const TAB_TITLES = {
@@ -6933,7 +7309,7 @@ const TAB_GROUP_KEY = {
 };
 const POOL_LOADED = { done: false };
 const PK = { loaded: false, data: null, idx: 0, sel: "", sort: "rank", open: "",
-             bear: null, bearKey: "" };
+             bear: null, bearKey: "", arch: null, archKey: "" };
 function ensureTabData(name) {
   if (name === "hub") { hubLoad(); hubTab(HUB.tab); }
   if (name === "stock" && !STK.loaded) stkLoad();
@@ -7618,7 +7994,10 @@ function bind() {
   $("#stockSel").addEventListener("change", (e) => { $("#code").value = e.target.value; });
   $("#btnRun").addEventListener("click", () => runBacktest());
   $("#btnRefresh").addEventListener("click", refreshData);
-  $("#btnClearCache").addEventListener("click", clearCache);
+  // 清的是需要几小时重下的 980 万根日线，必须二次确认（全站唯一漏掉的危险操作）
+  $("#btnClearCache").addEventListener("click", (e) => {
+    twoStep(e.currentTarget, "确认清空缓存", clearCache);
+  });
   $("#btnScan").addEventListener("click", runScan);
   $("#btnExport").addEventListener("click", exportTrades);
   $("#linkPool").addEventListener("click", (e) => { e.preventDefault(); switchTab("pool"); loadPool(); });
@@ -7867,12 +8246,13 @@ function bind() {
     switchTab("overview");
   });
   window.addEventListener("resize", () => {
-    Object.values(S.charts).forEach((c) => c.resize());
+    resizeCharts();
     syncSideCollapse();
   });
 }
 
 async function init() {
+  bindNumRules();
   $("#end").value = todayStr();
   $("#start").value = "2022-01-01";
   scrLoadPrefs();
@@ -7918,4 +8298,54 @@ async function init() {
   setTimeout(() => screenReview(null, true), 2500);
 }
 
-document.addEventListener("DOMContentLoaded", init);
+/* ---------------- 自绘标题栏（Tauri 窗口） ---------------- */
+/* 页面是从 127.0.0.1 加载的，属于「远程来源」：只有 capabilities/main-window.json
+   里显式放行了这个来源，IPC 才会注入。Tauri 2 里全局对象是 __TAURI_INTERNALS__
+   （invoke 在这里，最稳定）；__TAURI__ 默认不暴露，Tauri 1 才有 __TAURI__.window。
+   三者都拿不到就不加 body.in-tauri —— 标题栏不显示，退回浏览器/系统自带的装饰。 */
+function titlebarInit() {
+  const bind = (id, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("click", (ev) => { ev.stopPropagation(); fn(); });
+  };
+
+  // 路径 A：Tauri 2 内部 IPC（不依赖 withGlobalTauri，也不依赖 @tauri-apps/api 包）
+  const IT = window.__TAURI_INTERNALS__;
+  if (IT && typeof IT.invoke === "function") {
+    document.body.classList.add("in-tauri");
+    const call = (cmd) => IT.invoke(cmd).catch(() => {});
+    bind("tbMin",   () => call("plugin:window|minimize"));
+    bind("tbMax",   () => call("plugin:window|toggle_maximize"));
+    bind("tbClose", () => call("plugin:window|close"));   // 走 Rust 的 CloseRequested → 收进托盘
+    return true;
+  }
+
+  // 路径 B：Tauri 2 正式 API（配置了 withGlobalTauri 时才有 __TAURI__.core.invoke）
+  const T = window.__TAURI__;
+  if (T && T.core && typeof T.core.invoke === "function") {
+    document.body.classList.add("in-tauri");
+    const call = (cmd) => T.core.invoke(cmd).catch(() => {});
+    bind("tbMin",   () => call("plugin:window|minimize"));
+    bind("tbMax",   () => call("plugin:window|toggle_maximize"));
+    bind("tbClose", () => call("plugin:window|close"));
+    return true;
+  }
+
+  // 路径 C：Tauri 1 对象式 API（仅兜底）
+  if (T && T.window && typeof T.window.getCurrentWindow === "function") {
+    let win = null;
+    try { win = T.window.getCurrentWindow(); } catch (e) { return false; }
+    if (!win) return false;
+    document.body.classList.add("in-tauri");
+    bind("tbMin",   () => win.minimize());
+    bind("tbMax",   () => win.toggleMaximize());
+    bind("tbClose", () => win.close());
+    return true;
+  }
+  return false;
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  titlebarInit();   // 先画标题栏，别等首屏数据回来才出现
+  init();
+});

@@ -28,9 +28,15 @@ import time
 import zipfile
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
+from paths import BASE, DATA
 PACK_DIR = BASE / "data" / "packs"
 DB_PATH = BASE / "data" / "quant.db"
+
+# 导出/导入的列顺序：必须和 quant.db 的实际 schema 一致。导入端逐列比对表头，
+# 顺序错了会把 open 写进 high 这类静默错误。顺序取自 store 建表语句。
+BAR_COLS = ("code", "date", "open", "high", "low", "close", "volume", "amount",
+            "pct", "turnover")
+META_COLS = ("code", "basis", "source", "updated", "last_date", "start", "rows")
 
 # 后台任务状态：前端轮询这个结构画进度（导出/导入都不阻塞请求）
 STATE: dict = {"kind": "", "running": False, "phase": "", "done": 0, "total": 0,
@@ -229,6 +235,27 @@ def inspect_pack(path: Path) -> dict:
 
 
 def import_bars(path: Path) -> dict:
+    """导入入口：与流水线共用进程锁，避免导入期间逐只行情写入撞锁。
+
+    981 万行要写一分钟以上，期间 bulkdata 的逐只 bars_write 会不断撞上写锁，
+    最终被记成「更新完成但失败几百只」，很难归因。
+    """
+    try:
+        import pipeline
+    except Exception:
+        return _import_bars_impl(path)
+    if not pipeline.PROC_LOCK.acquire():
+        return {"ok": False, "error": "有流水线/行情任务在跑，请等它结束后再导入"}
+    try:
+        return _import_bars_impl(path)
+    finally:
+        try:
+            pipeline.PROC_LOCK.release()
+        except Exception:
+            pass
+
+
+def _import_bars_impl(path: Path) -> dict:
     """把行情包合并进本地库（INSERT OR REPLACE，不动其它表）。"""
     info = inspect_pack(path)
     if not info.get("ok"):

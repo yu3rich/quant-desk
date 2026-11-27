@@ -18,11 +18,11 @@ import concurrent.futures as cf
 import csv
 import datetime as dt
 import json
+import os
 import time
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+from paths import BASE, DATA
 DATA.mkdir(parents=True, exist_ok=True)
 SPOT_CSV = DATA / "spot.csv"
 SPOT_META = DATA / "spot.json"
@@ -105,14 +105,20 @@ def refresh(codes: list[str] | None = None, workers: int = 4, merge: bool = Fals
         # 只刷新了部分代码时，别把全市场快照覆盖成几条
         rows = [v for k, v in load().items() if k not in got] + rows
     rows.sort(key=lambda x: x["code"])
-    with SPOT_CSV.open("w", encoding="utf-8-sig", newline="") as f:
+    # 先写临时文件再原子替换：否则写盘那几十毫秒里，行业/名单/快照线程读到的是
+    # 半截 CSV，现价整列变空，全链路静默降级成「无实时价」。
+    tmp_csv = SPOT_CSV.with_suffix(".csv.tmp")
+    with tmp_csv.open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS)
         w.writeheader()
         for r in rows:
             w.writerow({k: r.get(k, "") for k in FIELDS})
+    os.replace(tmp_csv, SPOT_CSV)
     now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    SPOT_META.write_text(json.dumps({"updated": now, "count": len(rows),
-                                     "source": "腾讯行情"}, ensure_ascii=False), encoding="utf-8")
+    tmp_meta = SPOT_META.with_suffix(".json.tmp")
+    tmp_meta.write_text(json.dumps({"updated": now, "count": len(rows),
+                                    "source": "腾讯行情"}, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp_meta, SPOT_META)
     return {"ok": True, "count": len(rows), "updated": now,
             "up": sum(1 for r in rows if _f(r["pct"]) > 0),
             "down": sum(1 for r in rows if _f(r["pct"]) < 0)}
@@ -172,6 +178,10 @@ def real_price(hfq_close: float, hfq_last: float, last_date: str, q: dict | None
     qd = str(q.get("qdate") or "")
     ld = str(last_date or "").replace("-", "")
     if qd and ld and qd == ld:
+        # 同一天的快照如果是盘中抓的，price 是「当时价」而不是收盘价；
+        # 用它换算会把当日收盘价算错，宁可不换算（展示层回退后复权并标注）。
+        if q.get("stale"):
+            return None
         ref = q.get("price")
     if not ref:
         ref = q.get("prev_close")

@@ -40,8 +40,7 @@ from pathlib import Path
 
 import pandas as pd
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+from paths import BASE, DATA
 UNIVERSE = DATA / "universe.csv"
 INDUSTRY_CSV = DATA / "industry.csv"
 META_JSON = DATA / "industry.json"

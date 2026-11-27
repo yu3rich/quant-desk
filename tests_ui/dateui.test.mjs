@@ -18,12 +18,13 @@ test("样本上限提示在输入框内部，且与输入框同一容器", () =>
   const m = html.match(/<div class="input-with-suffix"[\s\S]{0,300}?<\/div>/);
   assert.ok(m, "应有 input-with-suffix 容器");
   assert.ok(m[0].includes('id="scrLimit"'), "样本上限输入框应在容器内");
-  assert.ok(m[0].includes("0 = 全市场"), "提示文字应在容器内");
+  // 用户明确要求去掉框内的「0 = 全市场」后缀，说明改由字段标签承担
+  assert.ok(!m[0].includes("0 = 全市场"), "框内不应再有「0 = 全市场」后缀");
 
-  assert.ok(css.includes(".input-with-suffix input{width:100%;padding-right:82px}"),
-    "输入框应为后缀留空间");
-  assert.ok(css.includes(".input-suffix{position:absolute;right:10px"),
-    "后缀应绝对定位在输入框内");
+  assert.ok(css.includes(".input-with-suffix input{width:100%;padding-right:12px}"),
+    "去掉后缀后不再预留 82px 空白");
+  assert.ok(css.includes(".field-err.in{position:absolute"),
+    "校验提示应绝对定位在框内，不占布局");
 });
 
 test("日期控件没有快捷按钮（用户要求去掉）", () => {

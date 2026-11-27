@@ -27,7 +27,7 @@ import threading
 import time
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
+from paths import BASE, DATA
 CFG_PATH = BASE / "data" / "scheduler.json"
 
 DEFAULT = {
@@ -347,8 +347,21 @@ def _go(cfg: dict, trigger: str):
             except Exception:
                 pass
             return
-        # run_async 把进度写在 pipeline.RUN，这里跟着等，前端看到的是同一份状态
+        # run_async 把进度写在 pipeline.RUN，这里跟着等，前端看到的是同一份状态。
+        # 必须有上限：任一步卡死（如数据源登录无超时）会让 _running 永远为 True，
+        # 之后每次 _tick 都直接 return，定时任务静默失效直到重启。
+        deadline = time.time() + 90 * 60
         while pipeline.RUN.get("running"):
+            if time.time() > deadline:
+                try:
+                    import store
+                    store.log("scheduler", "等待流水线超过 90 分钟，放弃本轮", level="error",
+                              act="timeout")
+                except Exception:
+                    pass
+                _record(ok=False, brief="等待流水线超时（90 分钟）",
+                        ms=int((time.time() - t0) * 1000))
+                return
             time.sleep(2)
         res = pipeline.RUN.get("result") or {}
         steps = res.get("steps") or []

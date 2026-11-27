@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-BASE = Path(__file__).resolve().parent
+from paths import BASE, DATA
 CONFIG_PATH = BASE / "config.json"
 
 COLS = ["date", "open", "high", "low", "close", "volume", "amount", "pct", "turnover"]

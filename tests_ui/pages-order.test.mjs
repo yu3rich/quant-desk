@@ -50,7 +50,7 @@ test("单股页：进页面默认打开最近一次分析", async () => {
     assert.match(doc.getElementById("stkReport").textContent, /结论摘要/);
     assert.equal(doc.getElementById("stkMode").textContent, "AI · deepseek-flash");
     assert.equal(doc.getElementById("stkCode").value, "600519", "输入框回填到该股");
-    // 历史列表收敛到这只股票，而不是全站记录
+    // 历史列表展示全站记录（每条带股票名/代码），不是只剩当前这只
     assert.equal(doc.querySelectorAll("#stkHist .stk-hrow").length, 1);
     assert.equal(doc.getElementById("stkHistCount").textContent, "1 条");
   } finally {

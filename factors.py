@@ -37,7 +37,7 @@ import review
 import screener
 import store
 
-BASE = Path(__file__).resolve().parent
+from paths import BASE, DATA
 CACHE_PATH = BASE / "data" / "screen" / "factor_checkup.json"
 DECILES = 10
 

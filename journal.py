@@ -24,7 +24,7 @@ import os
 import re
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
+from paths import BASE, DATA
 DIR = BASE / "data" / "journal"
 
 SRC = ("manual", "ai", "local")

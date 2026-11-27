@@ -30,8 +30,7 @@ from pathlib import Path
 
 import requests
 
-BASE = Path(__file__).resolve().parent
-DATA = BASE / "data"
+from paths import BASE, DATA
 CFG_PATH = DATA / "valsrc.json"
 
 COVER_OK = 0.95      # 覆盖率达到这个比例才算「全市场」
