@@ -716,9 +716,17 @@
             <button class="mk-tab" data-period="week">周K</button>
             <button class="mk-tab" data-period="month">月K</button>
           </div>
-          <div class="mk-quote" id="mkQuote"></div>
         </div>
-        <div id="chartMK" class="chart tall"></div>
+        <div class="mk-body">
+          <div class="mk-chart"><div id="chartMK" class="chart tall"></div></div>
+          <aside class="mk-today" aria-label="今日行情">
+            <div class="mk-today-inner">
+              <div class="mk-quote" id="mkQuote"></div>
+              <dl class="mk-today-grid" id="mkTodayGrid"></dl>
+              <p class="mk-today-note" id="mkTodayNote"></p>
+            </div>
+          </aside>
+        </div>
         <p class="hint" id="mkNote">分时与五日按分钟还原盘中走势；日、周、月为前复权蜡烛图，最新价与实时行情一致。滚轮或拖动可缩放。</p>
       </div>
     </section>

@@ -105,16 +105,34 @@ def _hhmm(t: str) -> str:
     return "%s:%s" % (t[:2], t[2:])
 
 
+def _qt_num(arr: list, i: int):
+    try:
+        v = arr[i] if len(arr) > i else None
+        return float(v) if v not in ("", None) else None
+    except Exception:
+        return None
+
+
 def _qt_meta(qt: dict, key: str) -> dict:
-    """qt 数组里取名称与昨收（分时涨跌幅基准）。"""
+    """qt 数组里取名称、昨收，以及图表右侧「今日行情」要用的完整快照。
+
+    腾讯 qt 字段（0 起）：3 现价、4 昨收、5 今开、30 时间、32 涨跌幅、
+    33 最高、34 最低、36 成交量(手)、37 成交额(万元)、38 换手率。
+    字段缺失时返回 None，前端回退到 K 线/分钟数据，不编造。
+    """
     arr = (qt or {}).get(key) or []
     if len(arr) < 5:
-        return {"name": "", "pre_close": None}
-    try:
-        pre = float(arr[4]) if arr[4] not in ("", None) else None
-    except Exception:
-        pre = None
-    return {"name": str(arr[1] or ""), "pre_close": pre}
+        return {"name": "", "pre_close": None, "quote": None}
+    pre = _qt_num(arr, 4)
+    quote = {
+        "price": _qt_num(arr, 3), "pre_close": pre, "open": _qt_num(arr, 5),
+        "high": _qt_num(arr, 33), "low": _qt_num(arr, 34),
+        "volume": _qt_num(arr, 36) if _qt_num(arr, 36) is not None else _qt_num(arr, 6),
+        "amount": _qt_num(arr, 37), "turnover": _qt_num(arr, 38),
+        "pct": _qt_num(arr, 32),
+        "time": str(arr[30] or "") if len(arr) > 30 else "",
+    }
+    return {"name": str(arr[1] or ""), "pre_close": pre, "quote": quote}
 
 
 def _parse_minutes(rows: list) -> dict[str, tuple[float, float, float]]:
@@ -177,7 +195,7 @@ def intraday(code: str) -> dict:
     out = {
         "ok": True, "code": key[2:], "market": key[:2], "name": meta["name"],
         "period": "intraday", "date": body.get("date") or "",
-        "pre_close": pre, "last": last,
+        "pre_close": pre, "last": last, "quote": meta.get("quote"),
         "pct": round((last / pre - 1) * 100, 2) if (last and pre) else None,
         "axis": [_hhmm(t) for t in SLOTS],
         "price": price, "avg": avg, "vol": vol,
@@ -222,7 +240,7 @@ def five_day(code: str) -> dict:
         "ok": True, "code": key[2:], "market": key[:2], "name": meta["name"],
         "period": "five", "date": (str(days[-1].get("date")) if days else ""),
         # 五日图没有「首日昨收」可用，基准取首日开盘价，图例里写明口径
-        "pre_close": first, "last": last,
+        "pre_close": first, "last": last, "quote": meta.get("quote"),
         "pct": round((last / first - 1) * 100, 2) if (last and first) else None,
         "axis": axis, "price": price, "avg": avg, "vol": vol, "marks": marks,
         "days": len(days),
@@ -375,6 +393,7 @@ def kline(code: str, period: str = "day") -> dict:
         "ok": True, "code": key[2:], "market": key[:2], "name": meta["name"] or "",
         "period": period, "date": bars[-1]["date"],
         "pre_close": meta["pre_close"], "last": bars[-1]["close"],
+        "quote": meta.get("quote"),
         "pct": bars[-1]["pct"], "bars": bars, "count": len(bars),
         "source": src, "adjust": adjust,
         "advice": "前复权，最新价与实时行情一致" if adjust == "qfq" else "备用源不复权，除权日会有跳空",

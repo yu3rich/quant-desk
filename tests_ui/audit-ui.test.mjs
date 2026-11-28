@@ -83,4 +83,56 @@ test("样式锁：手机端冻结候选榜前两列，错误 pill 不再与上�
   assert.match(css, /#scrTable tr:not\(\.scr-detail-row\) > \*:nth-child\(2\)\{position:sticky/,
     "代码列应冻结");
   assert.doesNotMatch(css, /\.pill\.bad\{background:#fdeceb/, "错误 pill 不能再用上涨红");
+  // 行情走势：图:今日行情 = 2:1，且周期切换条不再画分割线（容易和涨停线混淆）
+  assert.match(css, /\.mk-chart\{flex:2 1 0/, "图表应占 2/3");
+  assert.match(css, /\.mk-today\{flex:1 1 0/, "今日行情应占 1/3");
+  assert.doesNotMatch(css, /\.mk-bar\{[^}]*border-bottom/, "周期条不应有分割线");
+  assert.match(css, /\.mk-tq-px\{font-size:var\(--fs-6\)/, "今日行情价格应放大到 34px（字阶第 6 档）");
+  assert.match(css, /\.mk-today-grid dd\{[^}]*font-size:var\(--fs-4\)/, "指标数值应放大");
+  // 候选榜展开行：日分时 2/3 + 今日行情 1/3，高度与面板齐平
+  assert.match(css, /\.scr-chart-main\{flex:2 1 0/, "分时图应占 2/3");
+  assert.match(css, /\.scr-today\{flex:1 1 0/, "今日行情应占 1/3");
+  assert.match(css, /\.scr-chart-main \.chart\.scr-mini\{height:286px/, "分时图高度应与面板齐平");
+});
+
+test("行情走势右侧今日行情：优先用 qt 快照，缺失回退 K 线", () => {
+  const ctx = makePage();
+  try {
+    const { doc, window } = ctx;
+    assert.ok(doc.getElementById("mkTodayGrid"), "走势图右侧应有今日行情容器");
+    const t = window.mkTodayHtml({
+      period: "intraday",
+      quote: { open: 10, high: 11, low: 9.5, pre_close: 9.8, volume: 12345,
+        amount: 6789, turnover: 1.2, time: "20261127150000" }
+    });
+    assert.match(t.grid, /今开/);
+    assert.match(t.grid, /11\.00/);
+    assert.match(t.grid, /1\.20<i class="unit">%<\/i>/, "单位应降级显示，不跟数字同级");
+    // 行情时间只在面板顶部出现一次，底部注释改为口径说明（以前两处重复同一时间戳）
+    assert.doesNotMatch(t.note, /11-27 15:00/, "底部注释不应再重复行情时间");
+    assert.match(t.note, /腾讯行情快照/);
+    const t2 = window.mkTodayHtml({
+      period: "day", pre_close: 4.8,
+      bars: [{ open: 5, high: 6, low: 4, close: 5.5, volume: 100 }]
+    });
+    assert.match(t2.grid, /5\.00/);
+    assert.match(t2.note, /按最新 K 线/);
+    const head = window.mkTodayQuoteHtml({
+      period: "intraday", last: 18.3, pre_close: 18.26,
+      quote: { price: 18.3, pre_close: 18.26, pct: 0.22, time: "20261127150000" }
+    });
+    assert.match(head, /mk-tq-px/);
+    assert.match(head, /18\.30/);
+    assert.match(head, /\+0\.22%/);
+    assert.match(head, /截至 11-27 15:00/, "行情时间只保留在顶部一次");
+    const side = window.scrTodayHtml({
+      period: "intraday", last: 18.3, pre_close: 18.26,
+      quote: { price: 18.3, pre_close: 18.26, open: 18.24, high: 18.5, low: 18.1,
+        volume: 12345, amount: 6789, turnover: 1.2, pct: 0.22, time: "20261127150000" }
+    });
+    assert.match(side, /scr-today-grid/);
+    assert.equal((side.match(/<dt>/g) || []).length, 8, "应有 8 项指标");
+  } finally {
+    close(ctx);
+  }
 });

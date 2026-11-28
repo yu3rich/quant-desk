@@ -16,15 +16,29 @@ function todayStr() {
   return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, "0"), String(d.getDate()).padStart(2, "0")].join("-");
 }
 function num(n, d) { return Number(n).toFixed(d === undefined ? 2 : d); }
+/* 数字排印：显示用数字走 numText —— 千分位 + 真减号 U+2212（不是连字符），
+   配合 CSS 的 tabular-nums/lining figures，列与列的小数点才能真的对齐。
+   num() 保留给图表刻度、样式宽度这类不面向阅读的内部取数。 */
+const MINUS = "\u2212";
+function numText(n, d) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return "—";
+  const s = Math.abs(v).toFixed(d === undefined ? 2 : d);
+  const dot = s.indexOf(".");
+  const ip = (dot < 0 ? s : s.slice(0, dot)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return (v < 0 ? MINUS : "") + ip + (dot < 0 ? "" : s.slice(dot));
+}
+/* 单位降一级灰度：数字是主角，亿/万/手/% 只是量纲 */
+function unitTag(u) { return u ? '<i class="unit">' + esc(String(u)) + "</i>" : ""; }
 function signCls(n) { return n > 0 ? "pos" : (n < 0 ? "neg" : ""); }
-function signed(n, d) { return (n > 0 ? "+" : "") + num(n, d) + "%"; }
+function signed(n, d) { return (n > 0 ? "+" : "") + numText(n, d) + "%"; }
 /* 统一的百分比格式：符号、颜色、小数位由参数控制。
    候选榜的「当日」早就带符号和红绿，「20 日动量」却只有数字——同一行两套观感。 */
 function fmtPct(v, opt) {
   const o = opt || {};
   if (v == null || v === "" || !Number.isFinite(Number(v))) return '<span class="pk-na">—</span>';
   const n = Number(v);
-  const s = (o.sign && n > 0 ? "+" : "") + n.toFixed(o.dp == null ? 2 : o.dp) + "%";
+  const s = (o.sign && n > 0 ? "+" : "") + numText(n, o.dp == null ? 2 : o.dp) + "%";
   return o.cls ? '<span class="' + (n > 0 ? "up" : n < 0 ? "down" : "") + '">' + s + "</span>" : s;
 }
 
@@ -655,6 +669,8 @@ async function mkLoad(period, opts) {
     $("#mkName").textContent = "行情走势";
     $("#mkSub").textContent = r.error || "读取失败";
     $("#mkQuote").innerHTML = "";
+    if ($("#mkTodayGrid")) $("#mkTodayGrid").innerHTML = "";
+    if ($("#mkTodayNote")) $("#mkTodayNote").textContent = "";
     return;
   }
   MK.data = r;
@@ -664,33 +680,114 @@ async function mkLoad(period, opts) {
 }
 
 function mkQuoteHtml(r) {
+  const q = r.quote || {};
   const up = (r.pct || 0) >= 0;
   const cls = up ? "pos" : "neg";
-  const px = r.last == null ? "—" : num(r.last, 2);
+  const last = r.last == null ? q.price : r.last;
+  const px = last == null ? "—" : num(last, 2);
+  const f2 = (x) => (x == null || !Number.isFinite(Number(x)) ? "—" : num(x, 2));
   let parts = [];
-  if (r.bars) {
+  if (q.open != null || q.high != null || q.volume != null) {
+    // 今日行情快照最准：盘中最高/最低不依赖分钟点是否齐全
+    parts = ["开 " + f2(q.open), "高 " + f2(q.high), "低 " + f2(q.low),
+      "量 " + (q.volume == null ? "—" : mkVol(q.volume))];
+  } else if (r.bars) {
     const b = r.bars[r.bars.length - 1];
-    parts = ["开 " + num(b.open, 2), "高 " + num(b.high, 2), "低 " + num(b.low, 2),
+    parts = ["开 " + f2(b.open), "高 " + f2(b.high), "低 " + f2(b.low),
       "量 " + mkVol(b.volume)];
   } else {
-    const v = r.price.filter((x) => x != null);
+    const v = (r.price || []).filter((x) => x != null);
     const mx = v.length ? Math.max.apply(null, v) : null;
     const mn = v.length ? Math.min.apply(null, v) : null;
     const total = (r.vol || []).reduce((s, x) => s + (x || 0), 0);
-    parts = ["高 " + (mx == null ? "—" : num(mx, 2)), "低 " + (mn == null ? "—" : num(mn, 2)),
-      "量 " + mkVol(total)];
+    parts = ["高 " + f2(mx), "低 " + f2(mn), "量 " + mkVol(total)];
   }
   return '<span class="mk-px ' + cls + '">' + px + "</span>" +
     '<span class="mk-pct ' + cls + '">' + (r.pct == null ? "—" : signed(r.pct)) + "</span>" +
     '<span class="mk-meta">' + parts.map(esc).join(" · ") + "</span>";
 }
 
-function mkVol(v) {
-  const n = Number(v) || 0;
-  if (n >= 1e8) return num(n / 1e8, 2) + " 亿手";
-  if (n >= 1e4) return num(n / 1e4, 2) + " 万手";
-  return num(n, 0) + " 手";
+function mkQTime(t) {
+  const s = String(t || "");
+  return s.length >= 12
+    ? s.slice(4, 6) + "-" + s.slice(6, 8) + " " + s.slice(8, 10) + ":" + s.slice(10, 12)
+    : "";
 }
+
+/* 今日行情的统一取数：优先腾讯 qt 快照（盘中最高最低、成交额、换手率只有它有），
+   没有快照时按当前周期的 K 线/分钟数据回退，缺失返回 null，前端显示「—」。 */
+function mkTodayData(r) {
+  const q = r.quote || {};
+  const b = (r.bars && r.bars[r.bars.length - 1]) || null;
+  const vals = (r.price || []).filter((x) => x != null);
+  const pick = (a, c) => (a == null ? c : a);
+  const last = pick(r.last, q.price);
+  const pre = pick(q.pre_close, r.pre_close);
+  const open = pick(q.open, b && b.open);
+  const high = pick(q.high, b ? b.high : (vals.length ? Math.max.apply(null, vals) : null));
+  const low = pick(q.low, b ? b.low : (vals.length ? Math.min.apply(null, vals) : null));
+  const vol = pick(q.volume, b ? b.volume : (r.vol || []).reduce((s, x) => s + (x || 0), 0));
+  const pct = pick(q.pct, r.pct);
+  return {
+    q, last, pre, open, high, low, vol,
+    amt: q.amount, turn: q.turnover,
+    pct, chg: (last != null && pre != null) ? last - pre : null,
+    amp: (high != null && low != null && pre) ? (high - low) / pre * 100 : null
+  };
+}
+
+/* 面板顶部：大价格 + 涨跌额/涨跌幅，字号比原来的行内摘要大一级。
+   行情时间只在这里出现一次（以前底部注释又写一遍同样的时间戳）。 */
+function mkTodayQuoteHtml(r) {
+  const d = mkTodayData(r);
+  const cls = d.pct > 0 ? "pos" : d.pct < 0 ? "neg" : "";
+  const chg = d.chg == null ? "—" : (d.chg > 0 ? "+" : "") + numText(d.chg, 2);
+  return '<div class="mk-tq-top"><span>今日行情</span>' +
+      '<em class="mk-tq-time" data-tip="行情快照时间，盘中约每 4 秒更新一次">' +
+      (d.q.time ? "截至 " + mkQTime(d.q.time) : "实时") + "</em></div>" +
+    '<div class="mk-tq-px ' + cls + '">' + numText(d.last, 2) + "</div>" +
+    '<div class="mk-tq-chg"><b class="' + cls + '">' + chg + "</b>" +
+      '<span class="' + cls + '">' + (d.pct == null ? "—" : signed(d.pct)) + "</span></div>";
+}
+
+/* 8 张指标格：标签在上、数值在下，1/3 宽度下比左右排更好读。
+   单位用 .unit 降级，数字列才能按小数点对齐；时间只在面板顶部出现一次，
+   底部注释改为说明数据口径。 */
+function mkTodayCells(d) {
+  const f2 = (x) => (x == null || !Number.isFinite(Number(x)) ? "—" : numText(x, 2));
+  const side = (x) => (d.pre == null || x == null ? "" : x > d.pre ? "pos" : x < d.pre ? "neg" : "");
+  const cell = (label, val, cls, u) => "<div><dt>" + label + "</dt><dd" +
+    (cls ? ' class="' + cls + '"' : "") + ">" + val + unitTag(u) + "</dd></div>";
+  const [volV, volU] = d.vol == null ? ["—", ""] : mkVolParts(d.vol);
+  const [amtV, amtU] = mkAmtParts(d.amt);
+  return [
+    cell("今开", f2(d.open), side(d.open)), cell("昨收", f2(d.pre)),
+    cell("最高", f2(d.high), side(d.high)), cell("最低", f2(d.low), side(d.low)),
+    cell("成交量", volV, "", volU), cell("成交额", amtV, "", amtU),
+    cell("换手率", d.turn == null ? "—" : numText(d.turn, 2), "", d.turn == null ? "" : "%"),
+    cell("振幅", d.amp == null ? "—" : numText(d.amp, 2), "", d.amp == null ? "" : "%")
+  ].join("");
+}
+function mkTodayHtml(r) {
+  const d = mkTodayData(r);
+  const note = d.q.time ? "腾讯行情快照 · 盘口口径"
+    : (r.period === "intraday" ? "盘中分钟快照" : "按最新 K 线估算");
+  return { grid: mkTodayCells(d), note };
+}
+
+/* 成交额 qt 给的是万元；拆成「数值 + 单位」两份，单位由 CSS 降级显示 */
+function mkAmtParts(v) {
+  const n = Number(v);
+  if (v == null || !Number.isFinite(n)) return ["—", ""];
+  return Math.abs(n) >= 1e4 ? [numText(n / 1e4, 2), "亿"] : [numText(n, 0), "万"];
+}
+function mkVolParts(v) {
+  const n = Number(v) || 0;
+  if (n >= 1e8) return [numText(n / 1e8, 2), "亿手"];
+  if (n >= 1e4) return [numText(n / 1e4, 2), "万手"];
+  return [numText(n, 0), "手"];
+}
+function mkVol(v) { const p = mkVolParts(v); return p[0] + " " + p[1]; }
 
 function mkDate(s) {
   const t = String(s || "");
@@ -709,7 +806,10 @@ function mkRender(r) {
     // 走到备用源时要说清楚：新浪只有日线（周/月是本地合成）且不复权，
     // 否则用户看到除权跳空会以为是数据错了
     (!min && r.source && r.source !== "腾讯" ? " · 备用源 " + r.source : "");
-  $("#mkQuote").innerHTML = mkQuoteHtml(r);
+  $("#mkQuote").innerHTML = mkTodayQuoteHtml(r);
+  const today = mkTodayHtml(r);
+  if ($("#mkTodayGrid")) $("#mkTodayGrid").innerHTML = today.grid;
+  if ($("#mkTodayNote")) $("#mkTodayNote").textContent = today.note;
   $$("#mkTabs .mk-tab").forEach((t) => t.classList.toggle("on", t.dataset.period === r.period));
   if (r.period === "intraday" || r.period === "five") mkDrawMinute(r, c);
   else mkDrawCandle(r, c);
@@ -1321,13 +1421,13 @@ const RT = { loaded: false, data: null, busy: false, syncSeen: "", timer: null,
 
 function rtMoney(v, d) {
   const n = Number(v || 0);
-  return (n < 0 ? "-" : "") + "¥" + Math.abs(n).toLocaleString("zh-CN", {
+  return (n < 0 ? MINUS : "") + "¥" + Math.abs(n).toLocaleString("zh-CN", {
     minimumFractionDigits: d === undefined ? 2 : d, maximumFractionDigits: d === undefined ? 2 : d
   });
 }
 function rtPnl(v) {                       // 盈亏：正数带 +，红涨绿跌
   const n = Number(v || 0);
-  return (n > 0 ? "+" : n < 0 ? "-" : "") + "¥" + Math.abs(n).toLocaleString("zh-CN",
+  return (n > 0 ? "+" : n < 0 ? MINUS : "") + "¥" + Math.abs(n).toLocaleString("zh-CN",
     { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 function rtWan(v) {
@@ -1457,14 +1557,14 @@ function rtKpi(b) {
   if (!box) return;
   if (b.empty) {
     box.innerHTML = '<div class="kpi" style="grid-column:1/-1"><div class="k">还没有实盘数据</div>' +
-      '<div class="n" style="font-size:14px;font-weight:600">先同步账户</div>' +
+      '<div class="n" style="font-size:var(--fs-3);font-weight:600">先同步账户</div>' +
       '<div class="s">点「同步账户」拉资金与持仓，再点「拉取历史」补成交与流水。</div></div>';
     return;
   }
   const o = b.overview || {}, d = b.delta || {}, c = b.curve || {};
   if (!b.has_equity) {
     box.innerHTML = '<div class="kpi" style="grid-column:1/-1"><div class="k">只有成交流水，没有资金快照</div>' +
-      '<div class="n" style="font-size:14px;font-weight:600">点「同步账户」拉一次快照</div>' +
+      '<div class="n" style="font-size:var(--fs-3);font-weight:600">点「同步账户」拉一次快照</div>' +
       '<div class="s">历史成交补不了总资产与持仓 —— 资金曲线、仓位、集中度都要靠账户快照。</div></div>';
     return;
   }
@@ -1641,7 +1741,7 @@ function rtPos(b) {
     Math.min(100, x.mv_share || 0).toFixed(1) + '%"></i></div><span>' + num(x.mv_share, 1) + "%</span></div></td>" +
     '<td class="num ' + signCls(x.day_pnl) + '">' + rtPnl(x.day_pnl) + "</td>" +
     '<td class="num ' + signCls(x.pnl) + '">' + rtPnl(x.pnl) +
-    '<br><span style="font-size:10.5px;color:var(--ink3)">' + signed(x.pnl_pct) + "</span></td>" +
+    '<br><span style="font-size:var(--fs-1);color:var(--ink3)">' + signed(x.pnl_pct) + "</span></td>" +
     "<td>" + esc(x.industry || "未分类") + "</td>" +
     "</tr>").join("") +
     '<tr class="sum"><td colspan="5">合计</td><td class="num">' + rtMoney(p.mv, 0) + "</td>" +
@@ -1693,7 +1793,7 @@ function rtTrades(b) {
         ? "只累积了 " + t.sample_days + " 个交易日，不外推" : "成交额 ÷ 平均总资产 × 244", ""]
   ];
   box.innerHTML = items.map((x) =>
-    '<div class="kpi"><div class="k">' + x[0] + '</div><div class="n ' + x[3] + '" style="font-size:16px">' +
+    '<div class="kpi"><div class="k">' + x[0] + '</div><div class="n ' + x[3] + '" style="font-size:var(--fs-4)">' +
     x[1] + '</div><div class="s">' + esc(x[2]) + "</div></div>").join("");
 
   if (!body) return;
@@ -1720,7 +1820,7 @@ function rtFlow(b) {
   const c = b.cashflow || {};
   if (c.empty) {
     box.innerHTML = '<div class="kpi" style="grid-column:1/-1"><div class="k">没有资金流水</div>' +
-      '<div class="n" style="font-size:14px;font-weight:600">点「拉取历史」补 query_funds_flow</div>' +
+      '<div class="n" style="font-size:var(--fs-3);font-weight:600">点「拉取历史」补 query_funds_flow</div>' +
       '<div class="s">' + esc(c.note || "") + "</div></div>";
     if (body) body.innerHTML = "";
     if (hint) hint.textContent = "出入金 / 分红 / 利息 / 税";
@@ -1740,7 +1840,7 @@ function rtFlow(b) {
   ];
   box.innerHTML = items.map((x) =>
     '<div class="kpi"><div class="k">' + x[0] + '</div><div class="n ' + x[3] +
-    '" style="font-size:16px">' + x[1] + '</div><div class="s">' + esc(x[2]) + "</div></div>").join("");
+    '" style="font-size:var(--fs-4)">' + x[1] + '</div><div class="s">' + esc(x[2]) + "</div></div>").join("");
 
   if (!body) return;
   const rows = (c.rows || []).slice(0, 30);
@@ -1749,7 +1849,7 @@ function rtFlow(b) {
     "<tr>" +
     '<td style="width:64px">' + esc(x.date.slice(5)) + "</td>" +
     "<td>" + esc(x.kind || cls[x.class] || "—") +
-    (x.name ? ' <span style="color:var(--ink3);font-size:10.5px">' + esc(x.name) + "</span>" : "") + "</td>" +
+    (x.name ? ' <span style="color:var(--ink3);font-size:var(--fs-1)">' + esc(x.name) + "</span>" : "") + "</td>" +
     '<td class="num ' + signCls(x.amount) + '">' + rtPnl(x.amount) + "</td>" +
     '<td class="num">' + (x.balance ? rtMoney(x.balance, 0) : "—") + "</td>" +
     "</tr>").join("")
@@ -1763,7 +1863,7 @@ function rtOq(b) {
   const q = b.order_quality || {};
   if (q.empty) {
     box.innerHTML = '<div class="kpi" style="grid-column:1/-1"><div class="k">没有历史委托</div>' +
-      '<div class="n" style="font-size:14px;font-weight:600">点「拉取历史」补 query_history_orders</div>' +
+      '<div class="n" style="font-size:var(--fs-3);font-weight:600">点「拉取历史」补 query_history_orders</div>' +
       '<div class="s">' + esc(q.note || "") + "</div></div>";
     if (note) note.textContent = "";
     if (hint) hint.textContent = "撤单率 / 成交率 / 滑点";
@@ -1782,7 +1882,7 @@ function rtOq(b) {
   ];
   box.innerHTML = items.map((x) =>
     '<div class="kpi"><div class="k">' + x[0] + '</div><div class="n ' + x[3] +
-    '" style="font-size:16px">' + x[1] + '</div><div class="s">' + esc(x[2]) + "</div></div>").join("");
+    '" style="font-size:var(--fs-4)">' + x[1] + '</div><div class="s">' + esc(x[2]) + "</div></div>").join("");
   if (note) note.textContent = q.note || "";
 
   const body = $("#rtOqBody");
@@ -2854,7 +2954,7 @@ function scrNum(id, def) {
 }
 function scrFmt(v, d) {
   if (v == null || v === "" || !Number.isFinite(Number(v))) return "—";
-  return Number(v).toFixed(d === undefined ? 2 : d);
+  return numText(v, d === undefined ? 2 : d);
 }
 // 默认值升级：旧偏好里存的是上一版默认值（TopN=10、训练上限=300），
 // 直接恢复会让新默认不生效。只在「存的正好等于旧默认」时迁移，用户手动改过的值不动。
@@ -3003,7 +3103,7 @@ function renderScrModel(m) {
   ];
   $("#scrModel").innerHTML = '<div class="scr-kv">' + kv.map((p) =>
     '<div class="k">' + p[0] + '</div><div class="v">' + p[1] + "</div>").join("") + "</div>" +
-    (top.length ? '<div style="font-size:12px;font-weight:700;margin:12px 0 4px">特征重要度（Gain，前 8）</div>' +
+    (top.length ? '<div style="font-size:var(--fs-2);font-weight:700;margin:12px 0 4px">特征重要度（Gain，前 8）</div>' +
       top.map((e) => '<div class="scr-bar"><span class="nm">' + esc(e[0]) +
         '</span><span class="tr"><span class="fi" style="width:' + Math.max(3, e[1] / maxV * 100) +
         '%"></span></span><span class="vl">' + scrFmt(e[1] * 100, 1) + "%</span></div>").join("") : "") +
@@ -3329,7 +3429,14 @@ function scrDetailHtml(x) {
           '<section class="scr-line-chart">' +
             '<div class="scr-block-h"><h4>日分时</h4>' +
               '<span class="scr-ch-q" id="scrChQ_' + x.code + '">读取分时…</span></div>' +
-            '<div id="scrCh_' + x.code + '" class="chart scr-mini"></div>' +
+            '<div class="scr-chart-row">' +
+              '<div class="scr-chart-main">' +
+                '<div id="scrCh_' + x.code + '" class="chart scr-mini"></div>' +
+              "</div>" +
+              '<aside class="scr-today" id="scrToday_' + x.code + '">' +
+                '<div class="scr-today-inner"><span class="scr-dim">读取行情…</span></div>' +
+              "</aside>" +
+            "</div>" +
           "</section>" +
         "</div>" + bearBlock +
       "</div>" +
@@ -3385,6 +3492,21 @@ function renderScrRows() {
   SCR.detail.forEach((code) => scrChartLoad(code));
 }
 /* 候选榜展开行的行内分时图：代码进 SCR.detail 就会自动加载 */
+/* 候选榜展开行里的「今日行情」：面板只有 1/3 宽（约 220px），
+   用单列小字号，价格仍保留 26px 主次层级，和右侧图表齐平。 */
+function scrTodayHtml(r) {
+  const d = mkTodayData(r);
+  const cls = d.pct > 0 ? "pos" : d.pct < 0 ? "neg" : "";
+  const chg = d.chg == null ? "—" : (d.chg > 0 ? "+" : "") + numText(d.chg, 2);
+  return '<div class="scr-today-inner">' +
+    '<div class="mk-tq-top"><span>今日行情</span><em class="mk-tq-time">' +
+      (d.q.time ? "截至 " + mkQTime(d.q.time) : "实时") + "</em></div>" +
+    '<div class="mk-tq-px ' + cls + '">' + numText(d.last, 2) + "</div>" +
+    '<div class="mk-tq-chg"><b class="' + cls + '">' + chg + "</b>" +
+      '<span class="' + cls + '">' + (d.pct == null ? "—" : signed(d.pct)) + "</span></div>" +
+    '<dl class="scr-today-grid">' + mkTodayCells(d) + "</dl></div>";
+}
+
 async function scrChartLoad(code) {
   const box = document.getElementById("scrCh_" + code);
   if (!box) return;
@@ -3400,9 +3522,13 @@ async function scrChartLoad(code) {
   if (!r.ok) {
     c.clear();
     if (q) q.innerHTML = '<span class="scr-dim">' + esc(r.error || "分时读取失败") + "</span>";
+    const tp = document.getElementById("scrToday_" + code);
+    if (tp) tp.innerHTML = '<div class="scr-today-inner"><span class="scr-dim">行情读取失败</span></div>';
     return;
   }
-  if (q) q.innerHTML = mkQuoteHtml(r);
+  if (q) q.innerHTML = "";   // 价格与明细已进右侧面板，标题行不再重复
+  const tp = document.getElementById("scrToday_" + code);
+  if (tp) tp.innerHTML = scrTodayHtml(r);
   mkDrawMinute(r, c, true);
   c.resize();
 }

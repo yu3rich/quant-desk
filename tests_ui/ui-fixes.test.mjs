@@ -46,7 +46,7 @@ test("窄屏导航改侧滑抽屉、候选表收紧列宽", () => {
 });
 
 test("加载提示仍是原来的整屏遮罩，没有骨架层残留", () => {
-  assert.match(css, /#loading\{position:fixed;inset:0;background:rgba\(244,246,249,\.82\)/,
+  assert.match(css, /#loading\{position:fixed;inset:0;background:rgba\(242,244,247,\.82\)/,
     "加载态应恢复成整屏磨砂遮罩");
   assert.doesNotMatch(js, /skel-busy|SK_N|SK_QUIET/,
     "骨架预览逻辑应已完全回退");
